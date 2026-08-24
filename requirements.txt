@@ -1,0 +1,31 @@
+# Cadence Coach — Dependencies (pinned versions)
+
+# LLM & AI
+langchain==0.3.25
+langchain-core==0.3.59
+langchain-groq==0.3.2
+groq==0.25.0
+
+# Web Framework
+fastapi==0.115.12
+pydantic==2.11.3
+uvicorn==0.34.3
+python-multipart==0.0.20
+
+# Azure TTS
+azure-cognitiveservices-speech==1.44.0
+
+# Config
+python-dotenv==1.1.0
+
+# Auth
+authlib==1.6.0
+itsdangerous==2.2.0
+httpx==0.28.1
+
+# Testing
+pytest==8.3.5
+pytest-asyncio==0.26.0
+
+# Database
+mysql-connector-python==9.3.0

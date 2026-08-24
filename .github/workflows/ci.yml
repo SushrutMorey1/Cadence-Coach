@@ -1,0 +1,120 @@
+# ──────────────────────────────────────────────
+# Cadence Coach — CI/CD Pipeline
+# ──────────────────────────────────────────────
+# Runs on every push and pull request to main.
+# Steps: Install deps → Lint → Test → Build Docker image
+# ──────────────────────────────────────────────
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ────────────────────────────
+  # Job 1: Lint the code
+  # ────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install flake8
+        run: pip install flake8
+
+      - name: Run flake8
+        run: |
+          # E501 = line too long (we're lenient on this)
+          # W503 = line break before binary operator (outdated rule)
+          flake8 app/ tests/ --max-line-length=120 --ignore=E501,W503 --count --show-source
+
+  # ────────────────────────────
+  # Job 2: Run the tests
+  # ────────────────────────────
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: lint  # only run tests if linting passes
+
+    # Spin up a MySQL service container for the tests
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: testpassword
+          MYSQL_DATABASE: cadence_coach
+        ports:
+          - 3306:3306
+        # Wait until MySQL is ready before running tests
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    # Environment variables the app needs to start up
+    env:
+      GROQ_API_KEY: "fake-key-for-testing"
+      AZURE_SPEECH_KEY: "fake-key-for-testing"
+      AZURE_SPEECH_REGION: "centralindia"
+      GOOGLE_CLIENT_ID: "fake-client-id"
+      GOOGLE_CLIENT_SECRET: "fake-client-secret"
+      SESSION_SECRET_KEY: "ci-test-session-secret"
+      OAUTH_REDIRECT_URI: "http://localhost:8000/api/auth/callback"
+      MYSQL_HOST: "127.0.0.1"
+      MYSQL_PORT: "3306"
+      MYSQL_USER: "root"
+      MYSQL_PASSWORD: "testpassword"
+      MYSQL_DATABASE: "cadence_coach"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
+
+  # ────────────────────────────
+  # Job 3: Build the Docker image
+  # ────────────────────────────
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: test  # only build if tests pass
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t cadence-coach:${{ github.sha }} .
+
+      - name: Verify image was created
+        run: docker images cadence-coach:${{ github.sha }}

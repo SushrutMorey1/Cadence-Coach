@@ -1,0 +1,55 @@
+version: "3.9"
+
+services:
+  # ── MySQL Database ──
+  mysql:
+    image: mysql:8.0
+    container_name: cadence_coach_db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-cadence_coach}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - cadence_network
+
+  # ── FastAPI Backend ──
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cadence_coach_app
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Override MySQL host to use the service name inside Docker network
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+    ports:
+      - "8000:8000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    volumes:
+      - audio_output:/app/audio_output
+    networks:
+      - cadence_network
+
+volumes:
+  mysql_data:
+    driver: local
+  audio_output:
+    driver: local
+
+networks:
+  cadence_network:
+    driver: bridge

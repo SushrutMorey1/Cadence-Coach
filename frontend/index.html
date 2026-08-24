@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Cadence Coach — AI-powered speaking coach. Rewrite speeches, get coaching feedback, and track analytics.">
+  <meta name="theme-color" content="#0a0a0f">
+
+  <title>Cadence Coach — AI Speech Platform</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+  <!-- LOGIN SCREEN -->
+  <div id="login-screen" style="display: none; align-items: center; justify-content: center; height: 100vh; flex-direction: column;">
+    <h1 class="logo-text" style="margin-bottom: 2rem; font-size: 3rem;">Cadence<span class="logo-accent">Coach</span></h1>
+    <p style="margin-bottom: 2rem; color: var(--text-secondary); font-size: 1.2rem;">Sign in to access your dashboard.</p>
+    <button id="google-login-btn" class="btn btn--primary" type="button" style="padding: 12px 24px; font-size: 1.1rem; display: flex; align-items: center; gap: 10px;">
+      <svg viewBox="0 0 24 24" width="24" height="24" xmlns="http://www.w3.org/2000/svg">
+        <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+        <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+        <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+        <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+      </svg>
+      Sign in with Google
+    </button>
+  </div>
+
+  <!-- DASHBOARD UI -->
+  <div id="dashboard-ui" style="display: none;">
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!-- HEADER                                      -->
+  <!-- ═══════════════════════════════════════════ -->
+  <header id="app-header">
+    <div class="header-inner">
+      <div class="logo-group">
+        <div class="logo-icon" aria-hidden="true">
+          <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="16" cy="16" r="14" stroke="url(#logoGrad)" stroke-width="2.5"/>
+            <path d="M12 10v12M16 7v18M20 10v12M24 13v6M8 13v6" stroke="url(#logoGrad)" stroke-width="2" stroke-linecap="round"/>
+            <defs>
+              <linearGradient id="logoGrad" x1="0" y1="0" x2="32" y2="32">
+                <stop stop-color="#6ee7b7"/>
+                <stop offset="1" stop-color="#818cf8"/>
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+        <h1 class="logo-text">Cadence<span class="logo-accent">Coach</span></h1>
+      </div>
+      <nav class="header-nav">
+        <span id="connection-badge" class="badge badge--offline" title="API Status">
+          <span class="badge-dot"></span>
+          <span class="badge-label">Connecting…</span>
+        </span>
+      </nav>
+    </div>
+  </header>
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!-- TAB NAVIGATION                              -->
+  <!-- ═══════════════════════════════════════════ -->
+  <nav id="tab-bar" role="tablist" aria-label="Main navigation">
+    <div class="tab-bar-inner">
+      <button class="tab-btn active" role="tab" aria-selected="true" aria-controls="tab-director" data-tab="director" id="tab-btn-director">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+        Speech Director
+      </button>
+      <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-coach" data-tab="coach" id="tab-btn-coach">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+        Communication Coach
+      </button>
+      <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-analytics" data-tab="analytics" id="tab-btn-analytics">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+        Analytics Dashboard
+      </button>
+    </div>
+  </nav>
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!-- MAIN CONTENT                                -->
+  <!-- ═══════════════════════════════════════════ -->
+  <main id="app-main">
+
+    <!-- ══════════════════════════════════════════ -->
+    <!-- TAB 1 — SPEECH DIRECTOR (VOXIS)           -->
+    <!-- ══════════════════════════════════════════ -->
+    <section id="tab-director" class="tab-panel active" role="tabpanel" aria-labelledby="tab-btn-director">
+      <div class="section-inner">
+        <div class="panel-header">
+          <h2 class="section-title">Speech Director <span class="badge-tag">VOXIS</span></h2>
+          <p class="section-subtitle">Transform your raw text into a polished speech script with a specific speaking style, then hear it brought to life with Azure Neural TTS.</p>
+        </div>
+
+        <div class="two-column">
+          <!-- Left: Inputs -->
+          <div class="column" id="director-inputs">
+            <label class="form-label" for="director-text">Your Text</label>
+            <textarea id="director-text" class="form-textarea" rows="8" placeholder="Enter the text you want to transform into a polished speech..."></textarea>
+
+            <label class="form-label" for="director-style">Target Style</label>
+            <input id="director-style" class="form-input" type="text" placeholder="e.g., Inspirational TED Talk speaker, Morgan Freeman narration">
+
+            <label class="form-label" for="director-voice">Voice</label>
+            <select id="director-voice" class="form-select">
+              <option value="">Loading voices…</option>
+            </select>
+
+            <div class="btn-row">
+              <button id="btn-rewrite" class="btn btn--primary" type="button">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                Rewrite Only
+              </button>
+              <button id="btn-speak" class="btn btn--accent" type="button">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+                Rewrite &amp; Speak
+              </button>
+            </div>
+          </div>
+
+          <!-- Right: Output -->
+          <div class="column" id="director-output">
+            <div id="director-placeholder" class="empty-state">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+              <p>Your polished script will appear here</p>
+            </div>
+
+            <div id="director-results" class="hidden">
+              <div class="result-card">
+                <div class="card-header">
+                  <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></div>
+                  <h3 class="card-title">Polished Script</h3>
+                </div>
+                <div class="card-body">
+                  <div id="director-display-script" class="script-output"></div>
+                </div>
+              </div>
+
+              <details class="expander" id="director-tts-expander">
+                <summary class="expander-summary">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg>
+                  TTS Script (with annotations)
+                </summary>
+                <pre class="code-block" id="director-tts-script"></pre>
+              </details>
+
+              <div class="result-card" id="director-audio-card" class="hidden">
+                <div class="card-header">
+                  <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg></div>
+                  <h3 class="card-title">Audio Output</h3>
+                </div>
+                <div class="card-body">
+                  <p id="director-audio-meta" class="audio-meta"></p>
+                  <audio id="director-audio" controls preload="metadata">Your browser does not support the audio element.</audio>
+                </div>
+              </div>
+            </div>
+
+            <!-- Loading state for director -->
+            <div id="director-loading" class="hidden loader-inline">
+              <div class="loader-ring-sm"><div class="ring r1"></div><div class="ring r2"></div></div>
+              <span id="director-loading-text">Rewriting your text…</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══════════════════════════════════════════ -->
+    <!-- TAB 2 — COMMUNICATION COACH               -->
+    <!-- ══════════════════════════════════════════ -->
+    <section id="tab-coach" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-coach">
+      <div class="section-inner">
+        <div class="panel-header">
+          <h2 class="section-title">Communication Coach</h2>
+          <p class="section-subtitle">Get expert coaching feedback on your speech or presentation. Paste text or record/upload audio for full multimodal analysis.</p>
+        </div>
+
+        <div class="two-column">
+          <!-- Left: Inputs -->
+          <div class="column" id="coach-inputs">
+            <!-- Input mode toggle -->
+            <div class="toggle-group" role="radiogroup" aria-label="Input method">
+              <button class="toggle-btn active" data-mode="text" role="radio" aria-checked="true" id="toggle-text">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                Paste Text
+              </button>
+              <button class="toggle-btn" data-mode="audio" role="radio" aria-checked="false" id="toggle-audio">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+                Record / Upload Audio
+              </button>
+            </div>
+
+            <!-- Text input mode -->
+            <div id="coach-text-mode">
+              <label class="form-label" for="coach-text">Your Speech Text</label>
+              <textarea id="coach-text" class="form-textarea" rows="8" placeholder="Paste your speech or presentation text here..."></textarea>
+            </div>
+
+            <!-- Audio input mode -->
+            <div id="coach-audio-mode" class="hidden">
+              <!-- Waveform Visualizer -->
+              <div id="visualizer-wrap">
+                <canvas id="waveform-canvas" aria-label="Audio waveform visualizer"></canvas>
+                <div id="recording-timer" class="timer" aria-live="polite">00:00</div>
+              </div>
+
+              <div class="record-controls">
+                <button id="record-btn" class="btn btn--record" type="button" aria-label="Start recording">
+                  <span class="btn-icon" id="record-icon">
+                    <svg id="mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <rect x="9" y="1" width="6" height="12" rx="3"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><line x1="12" y1="18" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
+                    </svg>
+                    <svg id="stop-icon" class="hidden" viewBox="0 0 24 24" fill="currentColor">
+                      <rect x="4" y="4" width="16" height="16" rx="3"/>
+                    </svg>
+                  </span>
+                  <span class="btn-label" id="record-label">Record</span>
+                </button>
+              </div>
+
+              <div class="divider-or"><span>or</span></div>
+
+              <!-- File upload -->
+              <div id="upload-zone" class="upload-zone">
+                <input type="file" id="audio-file-input" accept=".mp3,.wav,.m4a,.ogg,.webm,.flac" hidden>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                <p>Drop an audio file here or <button type="button" class="link-btn" id="upload-browse-btn">browse</button></p>
+                <span class="upload-hint">MP3, WAV, M4A, OGG, WebM, FLAC — Max 25 MB</span>
+              </div>
+              <div id="upload-file-info" class="hidden file-info">
+                <span id="upload-filename"></span>
+                <button type="button" class="btn-icon-sm" id="upload-remove-btn" aria-label="Remove file">&times;</button>
+              </div>
+
+              <button id="btn-transcribe" class="btn btn--primary btn--full hidden" type="button">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                Transcribe &amp; Analyze
+              </button>
+            </div>
+
+            <!-- Transcription metrics (shown after audio transcribed) -->
+            <div id="coach-transcription-metrics" class="hidden">
+              <div class="section-divider"></div>
+              <h4 class="sub-heading">Speaking Metrics</h4>
+              <div class="metric-row" id="speaking-metrics-row"></div>
+              <div id="wpm-badge-wrap"></div>
+              <div id="filler-breakdown"></div>
+              <details class="expander" id="transcribed-text-expander">
+                <summary class="expander-summary">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                  Transcribed Text
+                </summary>
+                <div class="expander-body" id="transcribed-text-body"></div>
+              </details>
+            </div>
+
+            <div class="section-divider" id="coach-context-divider"></div>
+            <label class="form-label" for="coach-context">Context <span class="optional">(optional)</span></label>
+            <input id="coach-context" class="form-input" type="text" placeholder="e.g., Audience: investors. Occasion: Series A pitch.">
+
+            <button id="btn-analyze" class="btn btn--accent btn--full" type="button">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+              Analyze Speech
+            </button>
+          </div>
+
+          <!-- Right: Results -->
+          <div class="column" id="coach-output">
+            <div id="coach-placeholder" class="empty-state">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+              <p>Coaching analysis will appear here</p>
+            </div>
+
+            <!-- Loading state for coach -->
+            <div id="coach-loading" class="hidden loader-inline">
+              <div class="loader-ring-sm"><div class="ring r1"></div><div class="ring r2"></div></div>
+              <span id="coach-loading-text">Analyzing your communication…</span>
+            </div>
+
+            <!-- Coach results container -->
+            <div id="coach-results" class="hidden">
+              <!-- Overall score -->
+              <div class="result-card score-card">
+                <div class="card-header">
+                  <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></div>
+                  <h3 class="card-title">Overall Score</h3>
+                </div>
+                <div class="card-body score-body">
+                  <div class="score-ring-wrap">
+                    <svg class="score-ring" viewBox="0 0 120 120">
+                      <circle class="score-ring-bg" cx="60" cy="60" r="52"/>
+                      <circle class="score-ring-fill" id="score-ring-fill" cx="60" cy="60" r="52"
+                        stroke-dasharray="326.73" stroke-dashoffset="326.73"/>
+                    </svg>
+                    <span class="score-value" id="score-value">—</span>
+                  </div>
+                  <p class="score-summary" id="score-summary"></p>
+                </div>
+              </div>
+
+              <!-- Category scores row -->
+              <div class="metric-row" id="category-scores-row"></div>
+
+              <!-- Top 3 Actions -->
+              <div class="result-card actions-card">
+                <div class="card-header">
+                  <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></div>
+                  <h3 class="card-title">Top 3 Actions</h3>
+                </div>
+                <ol class="actions-list" id="actions-list"></ol>
+              </div>
+
+              <!-- Coaching detail expanders -->
+              <div id="coaching-details"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══════════════════════════════════════════ -->
+    <!-- TAB 3 — ANALYTICS DASHBOARD               -->
+    <!-- ══════════════════════════════════════════ -->
+    <section id="tab-analytics" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-analytics">
+      <div class="section-inner">
+        <div class="panel-header">
+          <div class="panel-header-row">
+            <div>
+              <h2 class="section-title">Analytics Dashboard</h2>
+              <p class="section-subtitle">Real-time observability for LLM and TTS operations — token usage, latency, cost tracking, and error rates.</p>
+            </div>
+            <button id="btn-refresh-metrics" class="btn btn--secondary" type="button">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+              Refresh
+            </button>
+          </div>
+        </div>
+
+        <div id="analytics-empty" class="empty-state hidden">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+          <p>No metrics data yet. Use the Speech Director or Communication Coach to generate data!</p>
+        </div>
+
+        <div id="analytics-content">
+          <!-- KPI cards -->
+          <h4 class="sub-heading">Key Performance Indicators</h4>
+          <div class="metric-row" id="kpi-row"></div>
+
+          <div class="section-divider"></div>
+
+          <!-- LLM + TTS detail tables -->
+          <div class="two-column">
+            <div class="column">
+              <h4 class="sub-heading">🧠 LLM Metrics</h4>
+              <div class="result-card">
+                <table class="detail-table" id="llm-detail-table">
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="column">
+              <h4 class="sub-heading">🔊 TTS Metrics</h4>
+              <div class="result-card">
+                <table class="detail-table" id="tts-detail-table">
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div class="section-divider"></div>
+
+          <!-- Endpoint breakdown -->
+          <div id="endpoint-section">
+            <h4 class="sub-heading">Per-Endpoint Breakdown</h4>
+            <div class="result-card table-card">
+              <div class="table-scroll">
+                <table class="data-table" id="endpoint-table">
+                  <thead>
+                    <tr><th>Endpoint</th><th>Calls</th><th>Avg Latency</th><th>Total Tokens</th><th>Total Cost</th></tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div class="section-divider"></div>
+
+          <!-- Cycle latency traces (waterfall) -->
+          <div id="cycle-section" class="hidden">
+            <h4 class="sub-heading">🔬 Deep Latency Inspector</h4>
+            <p class="section-subtitle" style="margin-bottom:12px;">Waterfall breakdown of every micro-task in each operation cycle. Click a row to see metadata.</p>
+            <div id="cycle-traces-container"></div>
+          </div>
+
+          <div class="section-divider"></div>
+
+          <!-- Recent calls -->
+          <div id="recent-section">
+            <h4 class="sub-heading">Recent API Calls</h4>
+            <div class="result-card table-card">
+              <div class="table-scroll">
+                <table class="data-table" id="recent-table">
+                  <thead>
+                    <tr><th>Time</th><th>Endpoint</th><th>Model</th><th>Tokens</th><th>Latency</th><th>Cost</th><th>Status</th></tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Error Toast ───────────────────────────── -->
+    <div id="error-toast" class="toast hidden" role="alert" aria-live="assertive">
+      <div class="toast-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+      </div>
+      <p class="toast-message" id="error-message"></p>
+      <button class="toast-close" id="toast-close-btn" type="button" aria-label="Dismiss">&times;</button>
+    </div>
+
+  </main>
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!-- FOOTER                                      -->
+  <!-- ═══════════════════════════════════════════ -->
+  <footer id="app-footer">
+    <p>Cadence Coach v2.0 &middot; Built with LangChain, Groq, Azure Neural TTS &amp; Whisper</p>
+  </footer>
+
+  </div> <!-- End of dashboard-ui -->
+
+  <script src="/app.js" defer></script>
+</body>
+</html>
