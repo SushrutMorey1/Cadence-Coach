@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import logging
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -12,7 +13,10 @@ from app.services.profiler import init_traces, get_traces, trace
 from app.services.rate_limiter import get_user_key
 from app.utils.parsing import parse_llm_json
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
+
+_MAX_RETRIES = 2
 
 
 @router.post("/synthesize")
@@ -46,63 +50,76 @@ async def synthesize_speech(request: SynthesizeRequest):
 @router.post("/rewrite-and-speak")
 async def rewrite_and_speak(request: RewriteAndSpeakRequest, raw_request: Request):
     """End-to-end: rewrite text then synthesize audio. Deep profiled."""
-    try:
-        init_traces()
-        user_key = get_user_key(raw_request)
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            init_traces()
+            user_key = get_user_key(raw_request)
 
-        with trace("Request Validation", category="compute",
-                    text_chars=len(request.user_text),
-                    style=request.target_style):
-            pass
+            with trace("Request Validation", category="compute",
+                        text_chars=len(request.user_text),
+                        style=request.target_style):
+                pass
 
-        # Step 1: Rewrite via LLM
-        result = await invoke_rewrite(
-            user_text=request.user_text,
-            target_style=request.target_style,
-            user_key=user_key,
-        )
+            # Step 1: Rewrite via LLM
+            result = await invoke_rewrite(
+                user_text=request.user_text,
+                target_style=request.target_style,
+                user_key=user_key,
+            )
 
-        with trace("Parse LLM JSON Output", category="compute") as span:
-            parsed = parse_llm_json(result["raw_output"])
-            span["meta"]["json_keys"] = list(parsed.keys())
-            span["meta"]["raw_output_chars"] = len(result["raw_output"])
+            with trace("Parse LLM JSON Output", category="compute") as span:
+                parsed = parse_llm_json(result["raw_output"])
+                span["meta"]["json_keys"] = list(parsed.keys())
+                span["meta"]["raw_output_chars"] = len(result["raw_output"])
 
-        if parsed.get("error"):
-            raise HTTPException(status_code=422, detail=parsed)
+            if parsed.get("error"):
+                error_msg = parsed.get("message", "LLM rejected the input")
+                raise HTTPException(status_code=422, detail=error_msg)
 
-        display_script = parsed["display_script"]
-        tts_script = parsed["tts_script"]
+            display_script = parsed["display_script"]
+            tts_script = parsed["tts_script"]
 
-        # Step 2: Resolve voice
-        with trace("Voice Resolution", category="compute",
-                    voice_input=request.voice or "(default)") as span:
-            voice = resolve_voice(request.voice)
-            span["meta"]["resolved_voice"] = voice
+            # Step 2: Resolve voice
+            with trace("Voice Resolution", category="compute",
+                        voice_input=request.voice or "(default)") as span:
+                voice = resolve_voice(request.voice)
+                span["meta"]["resolved_voice"] = voice
 
-        # Step 3: Synthesize
-        tts_result = await async_synthesize_to_file(
-            tts_script=display_script,
-            voice=voice,
-            target_style=request.target_style,
-        )
+            # Step 3: Synthesize
+            tts_result = await async_synthesize_to_file(
+                tts_script=display_script,
+                voice=voice,
+                target_style=request.target_style,
+            )
 
-        return {
-            "display_script": display_script,
-            "tts_script": tts_script,
-            "audio": {
-                "success": tts_result["success"],
-                "file_path": tts_result.get("file_path"),
-                "filename": tts_result.get("filename"),
-                "duration": tts_result.get("duration"),
-                "voice": voice,
-                "message": tts_result["message"],
-            },
-            "detailed_latencies": get_traces(),
-        }
+            return {
+                "display_script": display_script,
+                "tts_script": tts_script,
+                "audio": {
+                    "success": tts_result["success"],
+                    "file_path": tts_result.get("file_path"),
+                    "filename": tts_result.get("filename"),
+                    "duration": tts_result.get("duration"),
+                    "voice": voice,
+                    "message": tts_result["message"],
+                },
+                "detailed_latencies": get_traces(),
+            }
 
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=502, detail="LLM returned non-JSON output. Please retry.")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as err:
+            logger.warning(
+                "Rewrite-and-speak attempt %d/%d failed (%s): %s",
+                attempt + 1, _MAX_RETRIES + 1, type(err).__name__, err,
+            )
+            if attempt < _MAX_RETRIES:
+                continue
+            raise HTTPException(
+                status_code=502,
+                detail=f"LLM output could not be parsed after {_MAX_RETRIES + 1} attempts: {err}",
+            )
+
+        except HTTPException:
+            raise
+
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))

@@ -10,8 +10,11 @@ class RewriteRequest(BaseModel):
         ...,
         min_length=1,
         max_length=50_000,
-        description="The raw baseline text to be rewritten.",
-        examples=["Today we launch a product that will change the industry."],
+        description="Raw text to rewrite OR a command/instruction to generate content from scratch.",
+        examples=[
+            "Today we launch a product that will change the industry.",
+            "Write a speech for Gandhi Jayanti at school",
+        ],
     )
     target_style: str = Field(
         ...,
@@ -80,8 +83,11 @@ class RewriteAndSpeakRequest(BaseModel):
         ...,
         min_length=1,
         max_length=50_000,
-        description="The raw baseline text to be rewritten.",
-        examples=["Today we launch a product that will change the industry."],
+        description="Raw text to rewrite OR a command/instruction to generate content from scratch.",
+        examples=[
+            "Today we launch a product that will change the industry.",
+            "Write a speech for Gandhi Jayanti at school",
+        ],
     )
     target_style: str = Field(
         ...,

@@ -72,7 +72,7 @@ def trace(name: str, category: str = "general", **meta):
     state = _trace_ctx.get()
     if state is None:
         # Tracing not initialized — run the block without tracking
-        yield {}
+        yield {"meta": {}}
         return
 
     parent_name = state.stack[-1] if state.stack else None

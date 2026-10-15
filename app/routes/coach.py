@@ -1,6 +1,9 @@
 import json
+import logging
 
 from fastapi import APIRouter, HTTPException, Request
+
+logger = logging.getLogger(__name__)
 from app.models.schemas import CoachRequest, CoachResponse
 from app.services.llm import invoke_coach
 from app.services.profiler import init_traces, get_traces, trace
@@ -9,44 +12,66 @@ from app.utils.parsing import parse_llm_json
 
 router = APIRouter()
 
+_MAX_RETRIES = 2  # retry up to 2 more times on JSON parse failure
+
 
 @router.post("/coach", response_model=CoachResponse)
 async def coach_speech(request: CoachRequest, raw_request: Request):
     """Analyze text for communication quality and provide coaching feedback."""
-    try:
-        init_traces()
-        user_key = get_user_key(raw_request)
+    last_error = None
 
-        with trace("Request Validation", category="compute",
-                    text_chars=len(request.user_text)):
-            pass  # FastAPI already validated via Pydantic
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            init_traces()
+            user_key = get_user_key(raw_request)
 
-        result = await invoke_coach(
-            user_text=request.user_text,
-            context=request.context or "Not provided — infer from the text.",
-            user_key=user_key,
-        )
+            with trace("Request Validation", category="compute",
+                        text_chars=len(request.user_text)):
+                pass  # FastAPI already validated via Pydantic
 
-        with trace("Parse LLM JSON Output", category="compute") as span:
-            parsed = parse_llm_json(result["raw_output"])
-            span["meta"]["json_keys"] = list(parsed.keys())
-            span["meta"]["raw_output_chars"] = len(result["raw_output"])
+            result = await invoke_coach(
+                user_text=request.user_text,
+                context=request.context or "Not provided — infer from the text.",
+                user_key=user_key,
+            )
 
-        if parsed.get("error"):
-            raise HTTPException(status_code=422, detail=parsed)
+            with trace("Parse LLM JSON Output", category="compute") as span:
+                parsed = parse_llm_json(result["raw_output"])
+                span["meta"]["json_keys"] = list(parsed.keys())
+                span["meta"]["raw_output_chars"] = len(result["raw_output"])
 
-        with trace("Build Response Model", category="compute") as span:
-            parsed["detailed_latencies"] = get_traces()
-            response = CoachResponse(**parsed)
-            span["meta"]["overall_score"] = parsed.get("overall_score")
+            if parsed.get("error"):
+                error_msg = parsed.get("message", "LLM rejected the input")
+                raise HTTPException(status_code=422, detail=error_msg)
 
-        # Re-attach the final traces (including this span)
-        response.detailed_latencies = get_traces()
-        return response
+            with trace("Build Response Model", category="compute") as span:
+                parsed["detailed_latencies"] = get_traces()
+                response = CoachResponse(**parsed)
+                span["meta"]["overall_score"] = parsed.get("overall_score")
 
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=502, detail="LLM returned non-JSON output. Please retry.")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+            # Re-attach the final traces (including this span)
+            response.detailed_latencies = get_traces()
+            return response
+
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as err:
+            last_error = err
+            raw_snippet = (result.get("raw_output", "")[:200]
+                           if "result" in locals() else "N/A")
+            logger.warning(
+                "Coach attempt %d/%d failed (%s): %s. Raw snippet: %r",
+                attempt + 1, _MAX_RETRIES + 1,
+                type(err).__name__, err, raw_snippet,
+            )
+            if attempt < _MAX_RETRIES:
+                continue  # retry
+            raise HTTPException(
+                status_code=502,
+                detail=f"LLM output could not be parsed after {_MAX_RETRIES + 1} attempts: {err}",
+            )
+
+        except HTTPException:
+            raise
+
+        except Exception as e:
+            logger.error("Unexpected error in coach route: %s", e, exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))

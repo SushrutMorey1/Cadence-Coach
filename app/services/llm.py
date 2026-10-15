@@ -26,6 +26,7 @@ from app.utils.retry import async_retry
 logger = logging.getLogger(__name__)
 
 # ── LLM instance ──
+logger.info("Initializing ChatGroq with model=%s, max_tokens=%s", LLM_MODEL, LLM_MAX_TOKENS)
 llm = ChatGroq(
     model=LLM_MODEL,
     temperature=LLM_TEMPERATURE,

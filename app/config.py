@@ -4,13 +4,13 @@ from dotenv import load_dotenv
 
 # Load .env from project root
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(PROJECT_ROOT / ".env", override=True)
 
 # Groq / LLM
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
-LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.7"))
-LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "4096"))
+LLM_MODEL = os.getenv("LLM_MODEL", "qwen/qwen3.8-27b")
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.4"))
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2500"))
 
 # Azure Speech
 AZURE_SPEECH_KEY = os.getenv("AZURE_SPEECH_KEY")

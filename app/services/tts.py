@@ -2,6 +2,7 @@ import re
 import uuid
 import asyncio
 import logging
+import threading
 from typing import Optional
 
 import azure.cognitiveservices.speech as speechsdk
@@ -215,7 +216,7 @@ def _get_speech_config(output_format=None):
         region=AZURE_SPEECH_REGION,
     )
     if output_format is None:
-        output_format = speechsdk.SpeechSynthesisOutputFormat.Webm24Khz16BitMonoOpus
+        output_format = speechsdk.SpeechSynthesisOutputFormat.Audio24Khz48KBitRateMonoMp3
     config.set_speech_synthesis_output_format(output_format)
     return config
 
@@ -225,6 +226,79 @@ def resolve_voice(voice_input):
     if voice_input is None:
         return DEFAULT_VOICE
     return VOICES.get(voice_input, voice_input)
+
+
+# ── Synthesizer Pool (connection reuse) ─────────────────────
+
+class _SynthesizerPool:
+    """
+    Pool of pre-warmed Azure SpeechSynthesizer instances.
+
+    Reusing synthesizers avoids the TCP/TLS handshake + WebSocket
+    setup that adds ~1-2s of cold-start latency per request.
+    Synthesizers are created with audio_config=None so they are
+    not tied to a specific output file — callers write audio data
+    from result.audio_data to disk themselves.
+    """
+
+    def __init__(self, max_size: int = 3):
+        self._max_size = max_size
+        self._pool: list = []
+        self._lock = threading.Lock()
+        self._speech_config: Optional[speechsdk.SpeechConfig] = None
+
+    def _ensure_config(self):
+        """Lazily create and cache the default SpeechConfig."""
+        if self._speech_config is None:
+            self._speech_config = _get_speech_config()
+
+    def acquire(self) -> speechsdk.SpeechSynthesizer:
+        """Get a synthesizer from the pool, or create a new one."""
+        with self._lock:
+            if self._pool:
+                logger.debug("Reusing pooled synthesizer (%d remaining)", len(self._pool) - 1)
+                return self._pool.pop()
+
+        self._ensure_config()
+        logger.debug("Creating new synthesizer (pool was empty)")
+        return speechsdk.SpeechSynthesizer(
+            speech_config=self._speech_config,
+            audio_config=None,
+        )
+
+    def release(self, synthesizer: speechsdk.SpeechSynthesizer):
+        """Return a healthy synthesizer to the pool for reuse."""
+        with self._lock:
+            if len(self._pool) < self._max_size:
+                self._pool.append(synthesizer)
+                logger.debug("Returned synthesizer to pool (size=%d)", len(self._pool))
+            # Excess synthesizers are silently discarded
+
+    def warm(self, count: int = 1):
+        """Pre-create synthesizers to eliminate first-request cold start."""
+        self._ensure_config()
+        created = 0
+        for _ in range(min(count, self._max_size)):
+            with self._lock:
+                if len(self._pool) >= self._max_size:
+                    break
+            synth = speechsdk.SpeechSynthesizer(
+                speech_config=self._speech_config,
+                audio_config=None,
+            )
+            with self._lock:
+                if len(self._pool) < self._max_size:
+                    self._pool.append(synth)
+                    created += 1
+        logger.info("Warmed synthesizer pool with %d instance(s)", created)
+
+    @property
+    def size(self) -> int:
+        with self._lock:
+            return len(self._pool)
+
+
+_synth_pool = _SynthesizerPool(max_size=3)
 
 
 @sync_retry(
@@ -287,32 +361,55 @@ def synthesize_to_file(tts_script, voice=DEFAULT_VOICE, target_style=None, filen
     if not ssml:
         return {"success": False, "file_path": None, "duration": None, "message": "SSML generation failed."}
 
-    # Step 4: Initialize Azure Speech Config
-    with trace("Azure Speech Config Init", category="io") as span:
-        speech_config = _get_speech_config(output_format)
-        span["meta"]["region"] = AZURE_SPEECH_REGION
-        span["meta"]["output_format"] = str(output_format or "Webm24Khz16BitMonoOpus")
+    # Step 4: Prepare output file path
+    if filename is None:
+        filename = f"cadence_coach_{uuid.uuid4().hex[:8]}.mp3"
+    file_path = AUDIO_OUTPUT_DIR / filename
 
-    # Step 5: Initialize Synthesizer
-    with trace("Azure Synthesizer Init", category="io") as span:
-        if filename is None:
-            filename = f"cadence_coach_{uuid.uuid4().hex[:8]}.webm"
-        file_path = AUDIO_OUTPUT_DIR / filename
-        audio_config = speechsdk.audio.AudioOutputConfig(filename=str(file_path))
-        synthesizer = speechsdk.SpeechSynthesizer(
-            speech_config=speech_config,
-            audio_config=audio_config,
-        )
+    # Step 5: Acquire synthesizer (pooled for default format, new for custom)
+    use_pool = output_format is None
+    synthesizer = None
+
+    with trace("Acquire Synthesizer", category="io") as span:
+        if use_pool:
+            synthesizer = _synth_pool.acquire()
+            span["meta"]["source"] = "pool" if _synth_pool.size >= 0 else "new"
+        else:
+            speech_config = _get_speech_config(output_format)
+            synthesizer = speechsdk.SpeechSynthesizer(
+                speech_config=speech_config,
+                audio_config=None,
+            )
+            span["meta"]["source"] = "new (custom format)"
+            span["meta"]["output_format"] = str(output_format)
+        span["meta"]["region"] = AZURE_SPEECH_REGION
         span["meta"]["output_file"] = filename
-        span["meta"]["output_path"] = str(file_path)
 
     # Step 6: Azure TTS Network Call (with retry on transient errors)
-    with trace("Azure TTS Network Call", category="network",
-                voice=voice, style=valid_style or "default") as span:
-        result = _azure_tts_call(synthesizer, ssml)
-        span["meta"]["result_reason"] = str(result.reason)
+    synth_ok = False
+    try:
+        with trace("Azure TTS Network Call", category="network",
+                    voice=voice, style=valid_style or "default") as span:
+            result = _azure_tts_call(synthesizer, ssml)
+            span["meta"]["result_reason"] = str(result.reason)
+            if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
+                synth_ok = True
+                span["meta"]["audio_bytes"] = len(result.audio_data)
+    finally:
+        # Return to pool only on success; discard on failure (connection may be broken)
+        if use_pool:
+            if synth_ok:
+                _synth_pool.release(synthesizer)
+            else:
+                logger.warning("Discarding synthesizer after failed TTS call")
 
     if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
+        # Step 7: Write audio data to file
+        with trace("Write Audio File", category="io") as span:
+            file_path.write_bytes(result.audio_data)
+            span["meta"]["file"] = filename
+            span["meta"]["bytes"] = len(result.audio_data)
+
         duration = result.audio_duration.total_seconds() if result.audio_duration else None
         logger.info("Audio saved to %s (%.1fs)", file_path, duration or 0)
         return {

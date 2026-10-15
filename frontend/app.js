@@ -214,7 +214,7 @@
 
       if (!res.ok) {
         const d = await safeJson(res);
-        throw new Error(d?.detail || `Rewrite failed (${res.status})`);
+        throw new Error(getSafeErrorMsg(d, `Rewrite failed (${res.status})`));
       }
 
       const data = await res.json();
@@ -252,7 +252,7 @@
 
       if (!res.ok) {
         const d = await safeJson(res);
-        throw new Error(d?.detail || `Rewrite & Speak failed (${res.status})`);
+        throw new Error(getSafeErrorMsg(d, `Rewrite & Speak failed (${res.status})`));
       }
 
       const data = await res.json();
@@ -565,7 +565,7 @@
       const trRes = await fetch('/api/transcribe', { method: 'POST', body: formData });
       if (!trRes.ok) {
         const d = await safeJson(trRes);
-        throw new Error(d?.detail || `Transcription failed (${trRes.status})`);
+        throw new Error(getSafeErrorMsg(d, `Transcription failed (${trRes.status})`));
       }
 
       transcriptionData = await trRes.json();
@@ -649,7 +649,7 @@
 
     if (!res.ok) {
       const d = await safeJson(res);
-      throw new Error(d?.detail || `Coaching failed (${res.status})`);
+      throw new Error(getSafeErrorMsg(d, `Coaching failed (${res.status})`));
     }
 
     const data = await res.json();
@@ -1092,6 +1092,14 @@
 
   async function safeJson(res) {
     try { return await res.json(); } catch { return null; }
+  }
+
+  function getSafeErrorMsg(d, fallback) {
+    if (!d || !d.detail) return fallback;
+    if (typeof d.detail === 'string') return d.detail;
+    if (Array.isArray(d.detail)) return d.detail.map(e => e.msg || JSON.stringify(e)).join(', ');
+    if (typeof d.detail === 'object') return d.detail.message || JSON.stringify(d.detail);
+    return String(d.detail);
   }
 
   function logCycleMetrics(cycleType, totalLatencyMs, tasks) {
