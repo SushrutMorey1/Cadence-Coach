@@ -8,7 +8,7 @@ token streaming. Additive to the existing batch endpoints.
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from app.models.schemas import RewriteRequest, CoachRequest
+from app.models.schemas import RewriteRequest, CoachRequest, RewriteAndSpeakRequest
 from app.services.llm import stream_rewrite, stream_coach
 from app.services.rate_limiter import get_user_key
 
@@ -24,6 +24,29 @@ async def rewrite_stream(request: RewriteRequest, raw_request: Request):
         stream_rewrite(
             user_text=request.user_text,
             target_style=request.target_style,
+            speak=False,
+            user_key=user_key,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable Nginx buffering for SSE
+        },
+    )
+
+
+@router.post("/rewrite-and-speak/stream")
+async def rewrite_and_speak_stream(request: RewriteAndSpeakRequest, raw_request: Request):
+    """Stream rewrite tokens in real-time and progressively synthesize audio upon completion."""
+    user_key = get_user_key(raw_request)
+
+    return StreamingResponse(
+        stream_rewrite(
+            user_text=request.user_text,
+            target_style=request.target_style,
+            voice=request.voice,
+            speak=True,
             user_key=user_key,
         ),
         media_type="text/event-stream",

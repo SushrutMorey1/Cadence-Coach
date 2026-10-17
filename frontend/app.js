@@ -14,89 +14,89 @@
   // ── Cached DOM References ────────────────────────────────
   const els = {
     // Header
-    badge:         $('#connection-badge'),
-    badgeLabel:    $('#connection-badge .badge-label'),
+    badge: $('#connection-badge'),
+    badgeLabel: $('#connection-badge .badge-label'),
 
     // Tabs
-    tabBtns:       $$('.tab-btn'),
-    tabPanels:     $$('.tab-panel'),
+    tabBtns: $$('.tab-btn'),
+    tabPanels: $$('.tab-panel'),
 
     // Tab 1 — Director
-    directorText:       $('#director-text'),
-    directorStyle:      $('#director-style'),
-    directorVoice:      $('#director-voice'),
-    btnRewrite:         $('#btn-rewrite'),
-    btnSpeak:           $('#btn-speak'),
-    directorPlaceholder:$('#director-placeholder'),
-    directorResults:    $('#director-results'),
-    directorLoading:    $('#director-loading'),
-    directorLoadingText:$('#director-loading-text'),
+    directorText: $('#director-text'),
+    directorStyle: $('#director-style'),
+    directorVoice: $('#director-voice'),
+    btnRewrite: $('#btn-rewrite'),
+    btnSpeak: $('#btn-speak'),
+    directorPlaceholder: $('#director-placeholder'),
+    directorResults: $('#director-results'),
+    directorLoading: $('#director-loading'),
+    directorLoadingText: $('#director-loading-text'),
     directorDisplayScript: $('#director-display-script'),
-    directorTtsScript:  $('#director-tts-script'),
-    directorTtsExpander:$('#director-tts-expander'),
-    directorAudioCard:  $('#director-audio-card'),
-    directorAudio:      $('#director-audio'),
-    directorAudioMeta:  $('#director-audio-meta'),
+    directorTtsScript: $('#director-tts-script'),
+    directorTtsExpander: $('#director-tts-expander'),
+    directorAudioCard: $('#director-audio-card'),
+    directorAudio: $('#director-audio'),
+    directorAudioMeta: $('#director-audio-meta'),
 
     // Tab 2 — Coach
-    toggleText:     $('#toggle-text'),
-    toggleAudio:    $('#toggle-audio'),
-    coachTextMode:  $('#coach-text-mode'),
+    toggleText: $('#toggle-text'),
+    toggleAudio: $('#toggle-audio'),
+    coachTextMode: $('#coach-text-mode'),
     coachAudioMode: $('#coach-audio-mode'),
-    coachText:      $('#coach-text'),
-    coachContext:   $('#coach-context'),
-    btnAnalyze:     $('#btn-analyze'),
-    btnTranscribe:  $('#btn-transcribe'),
-    canvas:         $('#waveform-canvas'),
-    timer:          $('#recording-timer'),
-    recordBtn:      $('#record-btn'),
-    recordLabel:    $('#record-label'),
-    micIcon:        $('#mic-icon'),
-    stopIcon:       $('#stop-icon'),
-    uploadZone:     $('#upload-zone'),
+    coachText: $('#coach-text'),
+    coachContext: $('#coach-context'),
+    btnAnalyze: $('#btn-analyze'),
+    btnTranscribe: $('#btn-transcribe'),
+    canvas: $('#waveform-canvas'),
+    timer: $('#recording-timer'),
+    recordBtn: $('#record-btn'),
+    recordLabel: $('#record-label'),
+    micIcon: $('#mic-icon'),
+    stopIcon: $('#stop-icon'),
+    uploadZone: $('#upload-zone'),
     audioFileInput: $('#audio-file-input'),
-    uploadBrowseBtn:$('#upload-browse-btn'),
+    uploadBrowseBtn: $('#upload-browse-btn'),
     uploadFileInfo: $('#upload-file-info'),
     uploadFilename: $('#upload-filename'),
-    uploadRemoveBtn:$('#upload-remove-btn'),
+    uploadRemoveBtn: $('#upload-remove-btn'),
 
     // Coach — transcription metrics
     coachTranscriptionMetrics: $('#coach-transcription-metrics'),
     speakingMetricsRow: $('#speaking-metrics-row'),
-    wpmBadgeWrap:   $('#wpm-badge-wrap'),
-    fillerBreakdown:$('#filler-breakdown'),
+    wpmBadgeWrap: $('#wpm-badge-wrap'),
+    fillerBreakdown: $('#filler-breakdown'),
     transcribedTextBody: $('#transcribed-text-body'),
 
     // Coach — results
     coachPlaceholder: $('#coach-placeholder'),
-    coachLoading:    $('#coach-loading'),
-    coachLoadingText:$('#coach-loading-text'),
-    coachResults:    $('#coach-results'),
-    scoreRingFill:   $('#score-ring-fill'),
-    scoreValue:      $('#score-value'),
-    scoreSummary:    $('#score-summary'),
+    coachLoading: $('#coach-loading'),
+    coachLoadingText: $('#coach-loading-text'),
+    coachResults: $('#coach-results'),
+    scoreRingFill: $('#score-ring-fill'),
+    scoreValue: $('#score-value'),
+    scoreSummary: $('#score-summary'),
     categoryScoresRow: $('#category-scores-row'),
-    actionsList:     $('#actions-list'),
+    actionsList: $('#actions-list'),
     coachingDetails: $('#coaching-details'),
 
     // Tab 3 — Analytics
-    analyticsEmpty:  $('#analytics-empty'),
-    analyticsContent:$('#analytics-content'),
-    kpiRow:          $('#kpi-row'),
-    llmDetailTable:  $('#llm-detail-table tbody'),
-    ttsDetailTable:  $('#tts-detail-table tbody'),
-    endpointTable:   $('#endpoint-table tbody'),
-    cycleSection:    $('#cycle-section'),
+    analyticsEmpty: $('#analytics-empty'),
+    analyticsContent: $('#analytics-content'),
+    kpiRow: $('#kpi-row'),
+    llmDetailTable: $('#llm-detail-table tbody'),
+    ttsDetailTable: $('#tts-detail-table tbody'),
+    endpointTable: $('#endpoint-table tbody'),
+    cycleSection: $('#cycle-section'),
     cycleTracesContainer: $('#cycle-traces-container'),
-    recentTable:     $('#recent-table tbody'),
+    recentTable: $('#recent-table tbody'),
     btnRefreshMetrics: $('#btn-refresh-metrics'),
     endpointSection: $('#endpoint-section'),
-    recentSection:   $('#recent-section'),
+    recentSection: $('#recent-section'),
 
     // Toast
-    errorToast:     $('#error-toast'),
-    errorMessage:   $('#error-message'),
-    toastCloseBtn:  $('#toast-close-btn'),
+    errorToast: $('#error-toast'),
+    errorMessage: $('#error-message'),
+    toastCloseBtn: $('#toast-close-btn'),
   };
 
   // ── State ─────────────────────────────────────────────────
@@ -195,18 +195,109 @@
     els.btnSpeak.addEventListener('click', handleRewriteAndSpeak);
   }
 
+  // ── SSE Stream Reader Helper ──────────────────────────────
+  async function readSSEStream(res, onEvent) {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // keep trailing incomplete line
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (line.startsWith('data:')) {
+          const payloadStr = line.slice(5).trim();
+          if (payloadStr && payloadStr !== '{}') {
+            try {
+              const event = JSON.parse(payloadStr);
+              onEvent(event);
+            } catch (e) {
+              // Ignore non-JSON or heartbeat chunks
+            }
+          }
+        }
+      }
+    }
+
+    // Flush any trailing line left in buffer
+    if (buffer.trim()) {
+      const line = buffer.trim();
+      if (line.startsWith('data:')) {
+        const payloadStr = line.slice(5).trim();
+        if (payloadStr && payloadStr !== '{}') {
+          try {
+            const event = JSON.parse(payloadStr);
+            onEvent(event);
+          } catch (e) {
+            // Ignore non-JSON or heartbeat chunks
+          }
+        }
+      }
+    }
+  }
+
+  function resetDirectorOutput() {
+    // 1. Completely pause, detach, and reload any existing audio to prevent stale state/locks
+    if (els.directorAudio) {
+      try {
+        els.directorAudio.pause();
+        els.directorAudio.currentTime = 0;
+      } catch (e) {}
+      els.directorAudio.removeAttribute('src');
+      els.directorAudio.load();
+      els.directorAudio.classList.add('hidden');
+    }
+
+    // 2. Clear audio metadata text
+    if (els.directorAudioMeta) {
+      els.directorAudioMeta.textContent = '';
+    }
+
+    // 3. Hide audio card initially
+    if (els.directorAudioCard) {
+      els.directorAudioCard.classList.add('hidden');
+    }
+
+    // 4. Reset TTS script expander and content
+    if (els.directorTtsScript) {
+      els.directorTtsScript.textContent = '';
+    }
+    if (els.directorTtsExpander) {
+      els.directorTtsExpander.removeAttribute('open');
+    }
+
+    // 5. Cleanly reset display script with streaming structure
+    if (els.directorDisplayScript) {
+      els.directorDisplayScript.innerHTML = '<span class="streaming-text"></span><span class="streaming-cursor"></span>';
+    }
+
+    // 6. Ensure results view is active
+    showDirectorState('results');
+  }
+
   async function handleRewriteOnly() {
     const text = els.directorText.value.trim();
     const style = els.directorStyle.value.trim();
     if (!text || !style) return showToast('Please enter both text and a target style.');
 
-    showDirectorState('loading');
-    els.directorLoadingText.textContent = 'Rewriting your text…';
     setDirectorBtns(true);
+    resetDirectorOutput();
+
+    const streamEl = els.directorDisplayScript.querySelector('.streaming-text');
     const startRw = performance.now();
+    let streamText = '';
+    let totalLatencyMs = 0;
+    let detailedLatencies = [];
+    let completedNormally = false;
 
     try {
-      const res = await fetch('/api/rewrite', {
+      const res = await fetch('/api/rewrite/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_text: text, target_style: style }),
@@ -217,17 +308,38 @@
         throw new Error(getSafeErrorMsg(d, `Rewrite failed (${res.status})`));
       }
 
-      const data = await res.json();
-      const latencyMs = performance.now() - startRw;
-      const tasks = (data.detailed_latencies && data.detailed_latencies.length > 0) 
-          ? data.detailed_latencies 
-          : [{name: 'LLM Rewrite Request', latency_ms: latencyMs}];
+      await readSSEStream(res, (event) => {
+        if (event.type === 'token') {
+          streamText += event.text;
+          if (streamEl) streamEl.textContent = streamText;
+        } else if (event.type === 'script_done') {
+          els.directorDisplayScript.textContent = event.display_script || streamText;
+          els.directorTtsScript.textContent = event.tts_script || '';
+          completedNormally = true;
+        } else if (event.type === 'done') {
+          totalLatencyMs = event.total_latency_ms || (performance.now() - startRw);
+          detailedLatencies = event.detailed_latencies || [];
+        } else if (event.type === 'error') {
+          throw new Error(event.message || 'Stream rewrite failed');
+        }
+      });
+
+      const cursor = els.directorDisplayScript.querySelector('.streaming-cursor');
+      if (cursor) cursor.remove();
+
+      const latencyMs = totalLatencyMs || (performance.now() - startRw);
+      const tasks = (detailedLatencies && detailedLatencies.length > 0)
+        ? detailedLatencies
+        : [{ name: 'LLM Rewrite Stream', latency_ms: latencyMs }];
       logCycleMetrics('Rewrite Only', latencyMs, tasks);
-      renderDirectorResult(data.display_script, data.tts_script, null);
     } catch (err) {
-      showDirectorState('placeholder');
+      if (!completedNormally && !streamText) {
+        showDirectorState('placeholder');
+      }
       showToast(err.message);
     } finally {
+      const cursor = els.directorDisplayScript.querySelector('.streaming-cursor');
+      if (cursor) cursor.remove();
       setDirectorBtns(false);
     }
   }
@@ -238,13 +350,24 @@
     const voice = els.directorVoice.value;
     if (!text || !style) return showToast('Please enter both text and a target style.');
 
-    showDirectorState('loading');
-    els.directorLoadingText.textContent = 'Rewriting and synthesizing audio…';
     setDirectorBtns(true);
+    resetDirectorOutput();
+
+    // Progressive audio card setup: show card with drafting status
+    els.directorAudioCard.classList.remove('hidden');
+    els.directorAudio.classList.add('hidden');
+    els.directorAudioMeta.innerHTML = '<span class="status-pill status-pill--pulse">Drafting speech script…</span>';
+
+    const streamEl = els.directorDisplayScript.querySelector('.streaming-text');
     const startCycle = performance.now();
+    let streamText = '';
+    let totalLatencyMs = 0;
+    let audioReady = false;
+    let detailedLatencies = [];
+    let completedNormally = false;
 
     try {
-      const res = await fetch('/api/rewrite-and-speak', {
+      const res = await fetch('/api/rewrite-and-speak/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_text: text, target_style: style, voice }),
@@ -255,53 +378,63 @@
         throw new Error(getSafeErrorMsg(d, `Rewrite & Speak failed (${res.status})`));
       }
 
-      const data = await res.json();
-      const audioInfo = data.audio || {};
-
-      let audioUrl = null;
-      let audioMeta = '';
-
-      if (audioInfo.success && audioInfo.file_path) {
-        // Build URL from file path: extract filename from the path
-        const filename = audioInfo.filename || audioInfo.file_path.split('/').pop().split('\\').pop();
-        audioUrl = `/audio/${filename}`;
-        if (audioInfo.duration) {
-          audioMeta = `Duration: ${Number(audioInfo.duration).toFixed(1)}s  ·  Voice: ${audioInfo.voice || voice}`;
+      await readSSEStream(res, (event) => {
+        if (event.type === 'token') {
+          streamText += event.text;
+          if (streamEl) streamEl.textContent = streamText;
+        } else if (event.type === 'script_done') {
+          els.directorDisplayScript.textContent = event.display_script || streamText;
+          els.directorTtsScript.textContent = event.tts_script || '';
+          completedNormally = true;
+          const cursor = els.directorDisplayScript.querySelector('.streaming-cursor');
+          if (cursor) cursor.remove();
+        } else if (event.type === 'audio_status') {
+          els.directorAudioMeta.innerHTML = '<span class="status-pill status-pill--pulse">Synthesizing audio with Azure TTS…</span>';
+        } else if (event.type === 'audio_done') {
+          const audio = event.audio || {};
+          if (audio.success && (audio.filename || audio.file_path)) {
+            const filename = audio.filename || audio.file_path.split('/').pop().split('\\').pop();
+            els.directorAudio.src = `/audio/${filename}`;
+            els.directorAudio.classList.remove('hidden');
+            const dur = audio.duration ? `Duration: ${Number(audio.duration).toFixed(1)}s  ·  ` : '';
+            els.directorAudioMeta.textContent = `${dur}Voice: ${audio.voice || voice}`;
+            audioReady = true;
+          }
+        } else if (event.type === 'audio_error') {
+          els.directorAudioMeta.textContent = `Audio synthesis error: ${event.message || 'unknown'}`;
+        } else if (event.type === 'done') {
+          totalLatencyMs = event.total_latency_ms || (performance.now() - startCycle);
+          detailedLatencies = event.detailed_latencies || [];
+        } else if (event.type === 'error') {
+          throw new Error(event.message || 'Stream processing failed');
         }
+      });
+
+      const cursor = els.directorDisplayScript.querySelector('.streaming-cursor');
+      if (cursor) cursor.remove();
+
+      if (!audioReady) {
+        els.directorAudioCard.classList.add('hidden');
       }
 
-      if (data.detailed_latencies && data.detailed_latencies.length > 0) {
-        logCycleMetrics('Rewrite & Speak', performance.now() - startCycle, data.detailed_latencies);
-      } else if (data.latencies) {
-        logCycleMetrics('Rewrite & Speak', performance.now() - startCycle, data.latencies);
-      } else {
-        const total = performance.now() - startCycle;
-        logCycleMetrics('Rewrite & Speak', total, [{name: 'Rewrite & Speak API', latency_ms: total}]);
-      }
-
-      renderDirectorResult(data.display_script, data.tts_script, audioUrl, audioMeta);
+      const total = totalLatencyMs || (performance.now() - startCycle);
+      const tasks = (detailedLatencies && detailedLatencies.length > 0)
+        ? detailedLatencies
+        : [{ name: 'Rewrite & Speak Stream', latency_ms: total }];
+      logCycleMetrics('Rewrite & Speak', total, tasks);
     } catch (err) {
-      showDirectorState('placeholder');
+      if (!completedNormally && !streamText) {
+        showDirectorState('placeholder');
+      }
+      if (!audioReady) {
+        els.directorAudioCard.classList.add('hidden');
+      }
       showToast(err.message);
     } finally {
+      const cursor = els.directorDisplayScript.querySelector('.streaming-cursor');
+      if (cursor) cursor.remove();
       setDirectorBtns(false);
     }
-  }
-
-  function renderDirectorResult(displayScript, ttsScript, audioUrl, audioMeta) {
-    els.directorDisplayScript.textContent = displayScript || '';
-    els.directorTtsScript.textContent = ttsScript || '';
-    els.directorTtsExpander.removeAttribute('open');
-
-    if (audioUrl) {
-      els.directorAudio.src = audioUrl;
-      els.directorAudioMeta.textContent = audioMeta || '';
-      els.directorAudioCard.classList.remove('hidden');
-    } else {
-      els.directorAudioCard.classList.add('hidden');
-    }
-
-    showDirectorState('results');
   }
 
   function showDirectorState(state) {
@@ -535,7 +668,7 @@
 
   function stopWaveformVisualization() {
     if (animFrameId) { cancelAnimationFrame(animFrameId); animFrameId = null; }
-    if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; analyser = null; }
+    if (audioCtx) { audioCtx.close().catch(() => { }); audioCtx = null; analyser = null; }
     setTimeout(drawIdleWaveform, 50);
   }
 
@@ -571,11 +704,11 @@
       transcriptionData = await trRes.json();
       transcribedText = transcriptionData.text || '';
       const trLatency = performance.now() - startTr;
-      
+
       if (transcriptionData.detailed_latencies && transcriptionData.detailed_latencies.length > 0) {
         cycleTasks.push(...transcriptionData.detailed_latencies);
       } else {
-        cycleTasks.push({name: 'Whisper Transcribe Request', latency_ms: trLatency});
+        cycleTasks.push({ name: 'Whisper Transcribe Request', latency_ms: trLatency });
       }
 
       // Show transcription metrics
@@ -587,13 +720,13 @@
         els.coachLoadingText.textContent = 'Analyzing your communication…';
         const startCoach = performance.now();
         const coachData = await runCoachAnalysis(transcribedText);
-        
+
         if (coachData && coachData.detailed_latencies && coachData.detailed_latencies.length > 0) {
-            cycleTasks.push(...coachData.detailed_latencies);
+          cycleTasks.push(...coachData.detailed_latencies);
         } else {
-            cycleTasks.push({name: 'LLM Analyze Request', latency_ms: performance.now() - startCoach});
+          cycleTasks.push({ name: 'LLM Analyze Request', latency_ms: performance.now() - startCoach });
         }
-        
+
         logCycleMetrics('Transcribe & Analyze', performance.now() - startTr, cycleTasks);
       } else {
         showCoachState('placeholder');
@@ -624,9 +757,9 @@
     try {
       const data = await runCoachAnalysis(text);
       const latencyMs = performance.now() - startCoach;
-      const tasks = (data && data.detailed_latencies && data.detailed_latencies.length > 0) 
-          ? data.detailed_latencies 
-          : [{name: 'LLM Analyze Request', latency_ms: latencyMs}];
+      const tasks = (data && data.detailed_latencies && data.detailed_latencies.length > 0)
+        ? data.detailed_latencies
+        : [{ name: 'LLM Analyze Request', latency_ms: latencyMs }];
       logCycleMetrics('Analyze Only', latencyMs, tasks);
     } catch (err) {
       showCoachState('placeholder');
@@ -1046,9 +1179,8 @@
 
         let metaHTML = '';
         if (metaKeys.length > 0) {
-          metaHTML = `<div class="trace-meta"><div class="trace-meta-grid">${
-            metaKeys.map(k => `<div class="trace-meta-item"><strong>${esc(k)}:</strong> ${esc(String(meta[k]))}</div>`).join('')
-          }</div></div>`;
+          metaHTML = `<div class="trace-meta"><div class="trace-meta-grid">${metaKeys.map(k => `<div class="trace-meta-item"><strong>${esc(k)}:</strong> ${esc(String(meta[k]))}</div>`).join('')
+            }</div></div>`;
         }
 
         return `<div class="trace-span" data-category="${esc(category)}">
@@ -1116,8 +1248,8 @@
 
   function mimeToExt(mime) {
     if (mime.includes('webm')) return 'webm';
-    if (mime.includes('ogg'))  return 'ogg';
-    if (mime.includes('mp4'))  return 'mp4';
+    if (mime.includes('ogg')) return 'ogg';
+    if (mime.includes('mp4')) return 'mp4';
     return 'webm';
   }
 
@@ -1155,36 +1287,35 @@
 
 // Run this immediately when the page loads
 document.addEventListener('DOMContentLoaded', () => {
-    
-    // Check with the backend if the user has an active session cookie
-    fetch('/api/auth/me')
-        .then(response => response.json())
-        .then(data => {
-            if (!data.authenticated) {
-                // If NOT logged in: Hide the dashboard, show a Login UI
-                document.getElementById('dashboard-ui').style.display = 'none';
-                document.getElementById('login-screen').style.display = 'flex';
-            } else {
-                // If LOGGED in: Show the dashboard, maybe display their name
-                document.getElementById('login-screen').style.display = 'none';
-                document.getElementById('dashboard-ui').style.display = 'block';
-                console.log("Welcome back,", data.user?.name);
-            }
-        })
-        .catch(err => {
-            console.error("Auth check failed:", err);
-            // Default to showing login on error
-            document.getElementById('dashboard-ui').style.display = 'none';
-            document.getElementById('login-screen').style.display = 'flex';
-        });
 
-    // Attach this to your "Sign in with Google" button in the HTML
-    // We put this inside DOMContentLoaded to ensure the element exists
-    const loginBtn = document.getElementById('google-login-btn');
-    if (loginBtn) {
-        loginBtn.addEventListener('click', () => {
-            // This redirects the browser to your backend login route, which hands off to Google
-            window.location.href = '/api/auth/login'; 
-        });
-    }
+  // Check with the backend if the user has an active session cookie
+  fetch('/api/auth/me')
+    .then(response => response.json())
+    .then(data => {
+      if (!data.authenticated) {
+        // If NOT logged in: Hide the dashboard, show a Login UI
+        document.getElementById('dashboard-ui').style.display = 'none';
+        document.getElementById('login-screen').style.display = 'flex';
+      } else {
+        // If LOGGED in: Show the dashboard
+        document.getElementById('login-screen').style.display = 'none';
+        document.getElementById('dashboard-ui').style.display = 'block';
+      }
+    })
+    .catch(err => {
+      console.error("Auth check failed:", err);
+      // Default to showing login on error
+      document.getElementById('dashboard-ui').style.display = 'none';
+      document.getElementById('login-screen').style.display = 'flex';
+    });
+
+  // Attach this to your "Sign in with Google" button in the HTML
+  // We put this inside DOMContentLoaded to ensure the element exists
+  const loginBtn = document.getElementById('google-login-btn');
+  if (loginBtn) {
+    loginBtn.addEventListener('click', () => {
+      // This redirects the browser to your backend login route, which hands off to Google
+      window.location.href = '/api/auth/login';
+    });
+  }
 });

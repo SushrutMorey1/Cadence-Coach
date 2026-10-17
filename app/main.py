@@ -1,4 +1,3 @@
-from pathlib import Path
 import os
 import logging
 from contextlib import asynccontextmanager
@@ -49,8 +48,10 @@ app = FastAPI(
 
 
 # ── Rate-limiting endpoints (only LLM-consuming routes) ──
-_RATE_LIMITED_PATHS = {"/api/rewrite", "/api/coach", "/api/rewrite-and-speak",
-                      "/api/rewrite/stream", "/api/coach/stream"}
+_RATE_LIMITED_PATHS = {
+    "/api/rewrite", "/api/coach", "/api/rewrite-and-speak",
+    "/api/rewrite/stream", "/api/rewrite-and-speak/stream", "/api/coach/stream"
+}
 
 
 @app.middleware("http")
@@ -82,6 +83,17 @@ async def rate_limit_middleware(request: Request, call_next):
         return response
 
     return await call_next(request)
+
+
+@app.middleware("http")
+async def no_cache_static_middleware(request: Request, call_next):
+    """Prevent browser from aggressively caching app.js/style.css during development."""
+    response = await call_next(request)
+    if request.url.path.endswith((".js", ".css", ".html")) or request.url.path == "/":
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
 
 # 1. Add session middleware AFTER rate_limit_middleware so it is outermost (LIFO)
 #    This ensures the session scope is available when the rate limiter runs.
