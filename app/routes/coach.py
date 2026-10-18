@@ -12,7 +12,7 @@ from app.utils.parsing import parse_llm_json
 
 router = APIRouter()
 
-_MAX_RETRIES = 2  # retry up to 2 more times on JSON parse failure
+_MAX_RETRIES = 1  # retry at most once on non-length JSON parse failure
 
 
 @router.post("/coach", response_model=CoachResponse)
@@ -35,10 +35,29 @@ async def coach_speech(request: CoachRequest, raw_request: Request):
                 user_key=user_key,
             )
 
+            raw_output = result.get("raw_output", "")
+            finish_reason = result.get("finish_reason")
+            raw_tail = raw_output[-200:] if len(raw_output) >= 200 else raw_output
+
+            logger.info(
+                "Coach attempt %d/%d: finish_reason=%s. Last 200 chars: %r",
+                attempt + 1, _MAX_RETRIES + 1, finish_reason, raw_tail,
+            )
+
+            if finish_reason == "length":
+                logger.error(
+                    "Coach response truncated due to token limit (finish_reason='length'). Aborting retry. Last 200 chars: %r",
+                    raw_tail,
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail="The communication coach response exceeded the maximum token limit and was truncated. Please try again with a shorter section of text.",
+                )
+
             with trace("Parse LLM JSON Output", category="compute") as span:
-                parsed = parse_llm_json(result["raw_output"])
+                parsed = parse_llm_json(raw_output)
                 span["meta"]["json_keys"] = list(parsed.keys())
-                span["meta"]["raw_output_chars"] = len(result["raw_output"])
+                span["meta"]["raw_output_chars"] = len(raw_output)
 
             if parsed.get("error"):
                 error_msg = parsed.get("message", "LLM rejected the input")
@@ -55,15 +74,21 @@ async def coach_speech(request: CoachRequest, raw_request: Request):
 
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as err:
             last_error = err
-            raw_snippet = (result.get("raw_output", "")[:200]
-                           if "result" in locals() else "N/A")
+            raw_output = result.get("raw_output", "") if "result" in locals() else ""
+            finish_reason = result.get("finish_reason") if "result" in locals() else "unknown"
+            raw_tail = raw_output[-200:] if len(raw_output) >= 200 else raw_output
             logger.warning(
-                "Coach attempt %d/%d failed (%s): %s. Raw snippet: %r",
+                "Coach attempt %d/%d failed (%s): %s. finish_reason=%s. Last 200 chars: %r",
                 attempt + 1, _MAX_RETRIES + 1,
-                type(err).__name__, err, raw_snippet,
+                type(err).__name__, err, finish_reason, raw_tail,
             )
+            if finish_reason == "length":
+                raise HTTPException(
+                    status_code=502,
+                    detail="The communication coach response exceeded the maximum token limit and was truncated. Please try again with a shorter section of text.",
+                )
             if attempt < _MAX_RETRIES:
-                continue  # retry
+                continue  # retry at most once for other JSON errors
             raise HTTPException(
                 status_code=502,
                 detail=f"LLM output could not be parsed after {_MAX_RETRIES + 1} attempts: {err}",

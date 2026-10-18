@@ -10,7 +10,7 @@ load_dotenv(PROJECT_ROOT / ".env", override=True)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 LLM_MODEL = os.getenv("LLM_MODEL", "qwen/qwen3.8-27b")
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.4"))
-LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2500"))
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "1000"))
 
 # Azure Speech
 AZURE_SPEECH_KEY = os.getenv("AZURE_SPEECH_KEY")

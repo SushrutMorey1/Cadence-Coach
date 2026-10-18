@@ -143,7 +143,7 @@ class WeakWord(BaseModel):
 
 class VocabularyAnalysis(BaseModel):
     """Vocabulary coaching feedback."""
-    score: int
+    score: float
     strengths: List[str]
     improvements: List[str]
     weak_words: List[WeakWord]
@@ -152,7 +152,7 @@ class VocabularyAnalysis(BaseModel):
 
 class ToneAndEmotion(BaseModel):
     """Tone and emotional arc analysis."""
-    score: int
+    score: float
     detected_tone: str
     emotional_arc: str
     feedback: List[str]
@@ -167,13 +167,13 @@ class ModulationSuggestion(BaseModel):
 
 class VoiceModulation(BaseModel):
     """Voice modulation coaching feedback."""
-    score: int
+    score: float
     suggestions: List[ModulationSuggestion]
 
 
 class PacingAndRhythm(BaseModel):
     """Pacing and rhythm analysis."""
-    score: int
+    score: float
     avg_sentence_length: str
     variation_quality: str
     feedback: List[str]
@@ -188,13 +188,13 @@ class KeyMoment(BaseModel):
 
 class EmphasisAndDelivery(BaseModel):
     """Emphasis and delivery coaching."""
-    score: int
+    score: float
     key_moments: List[KeyMoment]
 
 
 class ClarityAndStructure(BaseModel):
     """Clarity and structural analysis."""
-    score: int
+    score: float
     opening_strength: str
     closing_strength: str
     transitions: str

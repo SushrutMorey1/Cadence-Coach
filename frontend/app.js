@@ -214,11 +214,15 @@
         if (line.startsWith('data:')) {
           const payloadStr = line.slice(5).trim();
           if (payloadStr && payloadStr !== '{}') {
+            let event = null;
             try {
-              const event = JSON.parse(payloadStr);
-              onEvent(event);
+              event = JSON.parse(payloadStr);
             } catch (e) {
               // Ignore non-JSON or heartbeat chunks
+              continue;
+            }
+            if (event) {
+              onEvent(event);
             }
           }
         }
@@ -231,11 +235,14 @@
       if (line.startsWith('data:')) {
         const payloadStr = line.slice(5).trim();
         if (payloadStr && payloadStr !== '{}') {
+          let event = null;
           try {
-            const event = JSON.parse(payloadStr);
-            onEvent(event);
+            event = JSON.parse(payloadStr);
           } catch (e) {
             // Ignore non-JSON or heartbeat chunks
+          }
+          if (event) {
+            onEvent(event);
           }
         }
       }

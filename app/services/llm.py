@@ -190,7 +190,13 @@ async def invoke_coach(user_text: str, context: str, user_key: str = "unknown") 
         total_tokens = prompt_tokens + completion_tokens
         await rate_limiter.consume(user_key, total_tokens)
 
-        return {"raw_output": raw_output, "latency_ms": latency_ms}
+        finish_reason = getattr(llm_response, "response_metadata", {}).get("finish_reason")
+
+        return {
+            "raw_output": raw_output,
+            "latency_ms": latency_ms,
+            "finish_reason": finish_reason,
+        }
 
     except Exception as e:
         latency_ms = (time.time() - start) * 1000
@@ -216,6 +222,9 @@ class DisplayScriptStreamExtractor:
         self.found_start = False
         self.is_done = False
         self.escaped = False
+        self.is_error = False
+        self.is_raw_text = False
+        self.char_buffer = ""
 
     def feed(self, chunk: str) -> str:
         if self.is_done or not chunk:
@@ -228,40 +237,95 @@ class DisplayScriptStreamExtractor:
                     self.buffer = self.buffer.split("</think>", 1)[1]
                 else:
                     return ""
+
+            # Check if model returned an error JSON early
+            if re.search(r'["“]error["”]\s*:\s*true', self.buffer):
+                self.is_error = True
+                self.is_done = True
+                return ""
+
             match = re.search(r'["“]display_script["”]\s*:\s*["“]', self.buffer)
             if match:
                 self.found_start = True
                 content_after = self.buffer[match.end():]
                 self.buffer = ""
                 return self._process_chars(content_after)
+
+            # Fallback if model outputs non-JSON directly
+            stripped = self.buffer.lstrip()
+            if len(stripped) > 100 and not stripped.startswith("{") and not stripped.startswith("```"):
+                self.found_start = True
+                self.is_raw_text = True
+                content = self.buffer
+                self.buffer = ""
+                return content
+
             return ""
+
+        if self.is_raw_text:
+            return chunk
+
         return self._process_chars(chunk)
 
     def _process_chars(self, text: str) -> str:
         output_chars = []
-        for ch in text:
+        self.char_buffer += text
+        i = 0
+        n = len(self.char_buffer)
+
+        while i < n:
             if self.is_done:
                 break
+            ch = self.char_buffer[i]
+
             if self.escaped:
                 if ch == 'n':
                     output_chars.append('\n')
                 elif ch == 't':
                     output_chars.append('\t')
-                elif ch in ('"', '”'):
+                elif ch == '"':
                     output_chars.append('"')
                 elif ch == '\\':
                     output_chars.append('\\')
+                elif ch == '/':
+                    output_chars.append('/')
                 else:
                     output_chars.append(ch)
                 self.escaped = False
+                i += 1
             elif ch == '\\':
                 self.escaped = True
-            elif ch in ('"', '”'):
-                self.is_done = True
-                break
+                i += 1
+            elif ch == '"':
+                remaining = self.char_buffer[i+1:]
+                rem_stripped = remaining.lstrip()
+                if not rem_stripped and len(remaining) < 5:
+                    break
+                if rem_stripped.startswith(',') or rem_stripped.startswith('}') or 'tts_script' in rem_stripped[:20]:
+                    self.is_done = True
+                    i += 1
+                    break
+                else:
+                    output_chars.append('"')
+                    i += 1
             else:
                 output_chars.append(ch)
+                i += 1
+
+        self.char_buffer = self.char_buffer[i:]
         return "".join(output_chars)
+
+    def flush(self) -> str:
+        """Flush any remaining buffered text when stream concludes."""
+        if self.is_raw_text and self.buffer:
+            res = self.buffer
+            self.buffer = ""
+            return res
+        if self.char_buffer and not self.is_done:
+            res = self.char_buffer.rstrip('"} \n\r\t')
+            self.char_buffer = ""
+            return res
+        return ""
 
 
 async def stream_rewrite(
@@ -325,6 +389,9 @@ async def stream_rewrite(
                         if delta:
                             payload = json.dumps({"type": "token", "text": delta})
                             yield f"data: {payload}\n\n"
+                tail = extractor.flush()
+                if tail:
+                    yield f"data: {json.dumps({'type': 'token', 'text': tail})}\n\n"
                 token_span["meta"]["token_chunks"] = len(collected_output)
 
             stream_span["meta"]["total_chunks"] = len(collected_output)
@@ -348,7 +415,16 @@ async def stream_rewrite(
 
         if parsed.get("error"):
             err_msg = parsed.get("message", "Model rejected the input.")
+            await log_llm_call(
+                endpoint=endpoint,
+                model=LLM_MODEL,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                latency_ms=latency_ms,
+                status=f"rejected: {parsed.get('error_code', 'INVALID_INPUT')}",
+            )
             yield f"data: {json.dumps({'type': 'error', 'message': err_msg})}\n\n"
+            yield f"event: done\ndata: {{}}\n\n"
             return
 
         display_script = parsed.get("display_script", "")

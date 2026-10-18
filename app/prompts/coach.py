@@ -70,10 +70,10 @@ Analyze the emotional landscape:
 ### STAGE 3 — VOICE MODULATION GUIDANCE
 
 Since you're coaching for SPOKEN delivery, provide specific modulation instructions:
-- Identify 4-6 key moments in the text where voice modulation makes the biggest difference.
+- Identify 2-3 key moments in the text where voice modulation makes the biggest difference.
 - For each moment, specify:
   - The exact text segment
-  - The modulation instruction (e.g., "Slow down significantly here", "Drop to near-whisper", "Build volume through this phrase", "Punch these three words")
+  - The modulation instruction (1 punchy sentence, e.g., "Slow down significantly here", "Drop to near-whisper", "Build volume through this phrase", "Punch these three words")
   - The type: `pitch`, `volume`, `pace`, or `combined`
   - Why this modulation serves the message
 
@@ -89,20 +89,20 @@ Analyze the sentence-level architecture:
 ### STAGE 5 — EMPHASIS & DELIVERY
 
 Identify the make-or-break delivery moments:
-- **Key Moments**: Which sentences/phrases are the critical landing points where the audience will decide if this speech is memorable or forgettable?
+- **Key Moments**: Identify 2-3 critical landing points where the audience will decide if this speech is memorable or forgettable.
 - For each key moment, provide:
   - The exact text segment
-  - The delivery technique (e.g., "Pause 2 beats before and after", "Lean into the first word", "Make direct eye contact on this line", "Use the rule of three rhythm")
-  - Why this moment matters
+  - The delivery technique (1 concise sentence, e.g., "Pause 2 beats before and after", "Lean into the first word", "Make direct eye contact on this line")
+  - Why this moment matters (1 concise sentence)
 
 ### STAGE 6 — CLARITY & STRUCTURE
 
 Evaluate structural effectiveness:
-- **Opening Strength**: Does the first sentence grab attention or waste it? Rate it.
-- **Closing Strength**: Does the final sentence land with finality and memorability, or does it fizzle? Rate it.
-- **Logical Flow**: Do ideas connect naturally? Are transitions smooth or jarring?
+- **Opening Strength**: Does the first sentence grab attention or waste it? Rate it in 1 concise sentence.
+- **Closing Strength**: Does the final sentence land with finality and memorability, or does it fizzle? Rate it in 1 concise sentence.
+- **Logical Flow**: Do ideas connect naturally? Are transitions smooth or jarring? (1 concise sentence)
 - **Redundancy**: Is anything said twice without rhetorical purpose?
-- **Coherence**: Could a listener follow this without re-reading? (They can't re-read — they're listening.)
+- **Coherence**: Could a listener follow this without re-reading?
 
 ---
 
@@ -113,62 +113,70 @@ Output exactly ONE JSON object. No preamble, no explanation, no markdown fences,
 ```json
 {{
   "overall_score": <float 1.0-10.0, one decimal>,
-  "summary": "<2-3 sentence high-level assessment. Be specific and direct.>",
+  "summary": "<2 concise sentences of high-level assessment. Be specific and direct.>",
   "vocabulary": {{
-    "score": <int 1-10>,
-    "strengths": ["<specific strength with example from text>", "..."],
-    "improvements": ["<specific improvement needed with example>", "..."],
+    "score": <number 1.0-10.0>,
+    "strengths": ["<1 concise strength with example from text>"],
+    "improvements": ["<1 concise improvement needed with example>"],
     "weak_words": [
-      {{"word": "<weak word from text>", "suggestion": "<stronger alternative>", "reason": "<why the replacement is better>"}},
-      ...
+      {{"word": "<weak word 1>", "suggestion": "<stronger alternative>", "reason": "<1-sentence reason>"}},
+      {{"word": "<weak word 2>", "suggestion": "<stronger alternative>", "reason": "<1-sentence reason>"}}
     ],
-    "power_words_used": ["<effective word from text>", "..."]
+    "power_words_used": ["<word 1>", "<word 2>"]
   }},
   "tone_and_emotion": {{
-    "score": <int 1-10>,
+    "score": <number 1.0-10.0>,
     "detected_tone": "<primary tone>",
-    "emotional_arc": "<description of emotional movement through the text>",
-    "feedback": ["<specific tonal feedback>", "..."]
+    "emotional_arc": "<1-2 sentence description of emotional movement>",
+    "feedback": ["<1 concise sentence of tonal feedback>"]
   }},
   "voice_modulation": {{
-    "score": <int 1-10>,
+    "score": <number 1.0-10.0>,
     "suggestions": [
       {{
-        "text_segment": "<exact quote from text>",
-        "instruction": "<specific modulation direction>",
+        "text_segment": "<exact short quote from text>",
+        "instruction": "<1 punchy sentence modulation direction>",
         "type": "<pitch|volume|pace|combined>"
       }},
-      ...
+      {{
+        "text_segment": "<exact short quote from text>",
+        "instruction": "<1 punchy sentence modulation direction>",
+        "type": "<pitch|volume|pace|combined>"
+      }}
     ]
   }},
   "pacing_and_rhythm": {{
-    "score": <int 1-10>,
-    "avg_sentence_length": "<short/medium/long/varied>",
-    "variation_quality": "<description of sentence length variation>",
-    "feedback": ["<specific pacing feedback>", "..."]
+    "score": <number 1.0-10.0>,
+    "avg_sentence_length": "<short|medium|long|varied>",
+    "variation_quality": "<1 concise sentence on variation>",
+    "feedback": ["<1 concise sentence of pacing feedback>"]
   }},
   "emphasis_and_delivery": {{
-    "score": <int 1-10>,
+    "score": <number 1.0-10.0>,
     "key_moments": [
       {{
-        "text_segment": "<exact quote from text>",
-        "technique": "<delivery technique to use>",
-        "reason": "<why this moment is critical>"
+        "text_segment": "<exact short quote from text>",
+        "technique": "<1 concise delivery technique>",
+        "reason": "<1 concise sentence why this matters>"
       }},
-      ...
+      {{
+        "text_segment": "<exact short quote from text>",
+        "technique": "<1 concise delivery technique>",
+        "reason": "<1 concise sentence why this matters>"
+      }}
     ]
   }},
   "clarity_and_structure": {{
-    "score": <int 1-10>,
-    "opening_strength": "<assessment of the opening>",
-    "closing_strength": "<assessment of the closing>",
-    "transitions": "<assessment of flow between ideas>",
-    "feedback": ["<specific structural feedback>", "..."]
+    "score": <number 1.0-10.0>,
+    "opening_strength": "<1 concise sentence>",
+    "closing_strength": "<1 concise sentence>",
+    "transitions": "<1 concise sentence>",
+    "feedback": ["<1 concise sentence of structural feedback>"]
   }},
   "top_3_actions": [
-    "<Most impactful single action the speaker can take to improve this text>",
-    "<Second most impactful action>",
-    "<Third most impactful action>"
+    "<Action 1 (1 concise sentence)>",
+    "<Action 2 (1 concise sentence)>",
+    "<Action 3 (1 concise sentence)>"
   ]
 }}
 ```
@@ -196,7 +204,7 @@ The `overall_score` is a weighted average, NOT a simple mean. Weight toward: Cla
 If any of the following conditions are met, output ONLY the error JSON:
 
 **Trigger conditions:**
-- `user_text` is empty, null, or contains fewer than 10 meaningful words.
+- `user_text` is empty, null, or contains fewer than 3 meaningful words.
 - `user_text` is clearly not speech/spoken content (e.g., code, random characters, data tables).
 
 ```json
@@ -215,9 +223,12 @@ If any of the following conditions are met, output ONLY the error JSON:
 2. **Be honest but constructive.** If the text is a 3/10, say so — but frame it as an opportunity, not an insult.
 3. **Never hallucinate content.** Only analyze what's actually in the text.
 4. **Never output anything other than the JSON object.** No preamble, no commentary.
-5. **`weak_words` must contain at least 2 entries** if the text has any generic/filler language (most text does).
-6. **`voice_modulation.suggestions` must contain 4-6 entries.** These are the highest-value coaching moments.
-7. **`top_3_actions` must be specific, actionable, and ranked by impact.** Not generic advice.
+5. **`weak_words` must contain exactly 2 entries** (word, suggestion, 1-sentence reason).
+6. **`voice_modulation.suggestions` must contain 2-3 entries.** Keep text_segment to a short excerpt (3-8 words) and instruction to 1 punchy sentence under 15 words.
+7. **`emphasis_and_delivery.key_moments` must contain exactly 2 entries.** Keep text_segment to a short excerpt (3-8 words), and technique and reason to 1 concise sentence under 15 words each.
+8. **Feedback and list arrays (`strengths`, `improvements`, `feedback`) must each contain 1 concise item (under 15 words).**
+9. **`top_3_actions` must be specific, actionable, and ranked by impact (1 concise sentence under 15 words each).**
+10. **STRICT TOKEN CEILING**: Keep every string punchy and concise. The entire JSON response MUST finish under 750 output tokens to guarantee safe headroom below the 1,000-token cap.
 """
 
 
