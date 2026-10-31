@@ -1,0 +1,40 @@
+# Render.com Blueprint — One-Click Deploy
+# https://render.com/docs/blueprint-spec
+#
+# To deploy:
+# 1. Push this repo to GitHub
+# 2. Go to https://dashboard.render.com/blueprints
+# 3. Connect the repo → Render auto-detects this file
+# 4. Fill in the secret environment variables in the Render dashboard
+#
+# Storage: SQLite inside the container on the free plan, so history and metrics reset
+# on every restart. For persistence use a paid plan with a disk mounted at /app/data,
+# or set DB_BACKEND=mysql and MYSQL_* to bring your own database.
+
+services:
+  - type: web
+    name: cadence-coach
+    runtime: docker
+    plan: free               # sleeps after ~15 min idle; the first request then takes 30-60 s
+    healthCheckPath: /api/health
+    envVars:
+      - key: DB_BACKEND
+        value: sqlite
+      - key: SQLITE_PATH
+        value: /app/data/cadence.db
+      - key: GROQ_API_KEY
+        sync: false
+      - key: LLM_MODEL
+        value: qwen/qwen3.8-27b
+      - key: AZURE_SPEECH_KEY
+        sync: false
+      - key: AZURE_SPEECH_REGION
+        value: centralindia
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: SESSION_SECRET_KEY
+        generateValue: true
+      - key: OAUTH_REDIRECT_URI
+        value: https://cadence-coach.onrender.com/api/auth/callback

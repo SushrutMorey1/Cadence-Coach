@@ -1,0 +1,70 @@
+# ──────────────────────────────────────────────
+# Cadence Coach — CI/CD Pipeline
+# ──────────────────────────────────────────────
+# Runs on every push and pull request.
+# Steps: Lint → Test (SQLite, no secrets) → Build Docker image
+# ──────────────────────────────────────────────
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, working-demo]
+  pull_request:
+    branches: [main, working-demo]
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install flake8
+        run: pip install flake8
+      - name: Run flake8
+        run: |
+          # E501 = line too long (we're lenient on this)
+          # W503 = line break before binary operator (outdated rule)
+          # E241/E127 = column-aligned tables and visual indents used deliberately in config/tts
+          flake8 app/ tests/ --max-line-length=120 --ignore=E501,W503,E241,E127 --count --show-source
+      - name: Syntax-check frontend modules
+        run: |
+          for f in frontend/js/*.js frontend/app.js; do node --check "$f"; done
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run tests (isolated SQLite, fake keys — see tests/conftest.py)
+        run: pytest tests/ -v --tb=short
+
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t cadence-coach:${{ github.sha }} .
+      - name: Smoke-test the container
+        run: |
+          docker run -d --name cc -p 8000:8000 -e DB_BACKEND=sqlite cadence-coach:${{ github.sha }}
+          for i in $(seq 1 20); do curl -sf http://localhost:8000/api/health && break; sleep 1; done
+          curl -sf http://localhost:8000/api/health | grep '"status":"online"'
+          docker rm -f cc

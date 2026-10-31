@@ -1,0 +1,62 @@
+version: "3.9"
+
+# Two ways to run:
+#   docker compose up backend            → SQLite, zero infra (demo / dev)
+#   docker compose --profile mysql up    → MySQL-backed (production-like)
+
+services:
+  # ── MySQL Database (optional, profile "mysql") ──
+  mysql:
+    image: mysql:8.0
+    container_name: cadence_coach_db
+    restart: unless-stopped
+    profiles: ["mysql"]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:-cadence}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-cadence_coach}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_PASSWORD:-cadence}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - cadence_network
+
+  # ── FastAPI Backend ──
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cadence_coach_app
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Falls back to SQLite automatically when MySQL is not running.
+      DB_BACKEND: ${DB_BACKEND:-auto}
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      SQLITE_PATH: /app/data/cadence.db
+    ports:
+      - "8000:8000"
+    volumes:
+      - audio_output:/app/audio_output
+      - app_data:/app/data
+    networks:
+      - cadence_network
+
+volumes:
+  mysql_data:
+    driver: local
+  audio_output:
+    driver: local
+  app_data:
+    driver: local
+
+networks:
+  cadence_network:
+    driver: bridge
