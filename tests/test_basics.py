@@ -97,3 +97,20 @@ def test_rewrite_request_valid():
 def test_coach_request_has_default_context():
     req = CoachRequest(user_text="My speech")
     assert req.context is not None
+
+
+class TestSignInRequired:
+    """With sign-in on, every paid or per-user API call needs a signed-in Google account."""
+
+    def test_paid_and_private_endpoints_need_a_session(self):
+        from unittest.mock import patch
+        anon = TestClient(app)
+        with patch("app.main.AUTH_REQUIRED", True):
+            for method, path in [("post", "/api/rewrite-and-speak/stream"), ("post", "/api/coach/stream"),
+                                 ("post", "/api/synthesize"), ("post", "/api/warm"),
+                                 ("post", "/api/transcribe"), ("get", "/api/metrics"),
+                                 ("get", "/api/auth/usage")]:
+                res = getattr(anon, method)(path)
+                assert res.status_code == 401, (path, res.status_code)
+            assert anon.get("/api/health").status_code == 200
+            assert anon.get("/api/auth/me").status_code == 200

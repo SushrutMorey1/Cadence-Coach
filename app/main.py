@@ -3,7 +3,7 @@ main.py — Cadence Coach Application
 ======================================
 FastAPI app wiring: lifespan (database, audio cleanup, TTS warm-up, model
 check), middleware (rate limiting, sessions, static cache policy), Google
-OAuth with a guest fallback, and the routers for the three tools —
+OAuth (required; guest mode only for local development), and the routers for the three tools —
 Speech Director, Communication Coach, Latency Lab.
 """
 
@@ -89,10 +89,10 @@ app = FastAPI(
 
 
 # ── Rate-limiting endpoints (LLM-consuming HTTP routes) ──
-_RATE_LIMITED_PATHS = {
-    "/api/rewrite", "/api/coach", "/api/rewrite-and-speak",
-    "/api/rewrite/stream", "/api/rewrite-and-speak/stream", "/api/coach/stream",
-}
+_RATE_LIMITED_PATHS = {"/api/rewrite/stream", "/api/rewrite-and-speak/stream", "/api/coach/stream"}
+
+# Reachable without signing in: health, and the sign-in flow itself.
+_PUBLIC_API_PATHS = {"/api/health", "/api/auth/login", "/api/auth/callback", "/api/auth/me", "/api/auth/logout"}
 
 
 @app.middleware("http")
@@ -127,6 +127,21 @@ async def rate_limit_middleware(request: Request, call_next):
 
 
 @app.middleware("http")
+async def require_login_middleware(request: Request, call_next):
+    """
+    Every API call that spends Groq or Azure quota, or reads a user's data, needs a
+    signed-in Google account: the email is the rate-limit and history key, so no
+    request can fall back to an IP that a client controls.
+    """
+    path = request.url.path
+    if AUTH_REQUIRED and path.startswith("/api/") and path not in _PUBLIC_API_PATHS:
+        user = request.session.get("user") or {}
+        if not user.get("email"):
+            return JSONResponse(status_code=401, content={"detail": "Sign in with Google to use Cadence Coach."})
+    return await call_next(request)
+
+
+@app.middleware("http")
 async def revalidate_static_middleware(request: Request, call_next):
     """
     Always revalidate the app's own files: the browser keeps its copy but asks
@@ -140,11 +155,33 @@ async def revalidate_static_middleware(request: Request, call_next):
     return response
 
 
+class ApiGzipMiddleware:
+    """
+    Gzip the API's JSON answers. Event streams are left alone (compression would
+    buffer them and delay every token), and so is audio, which is already MP3.
+    """
+
+    _UNCOMPRESSED = {"/api/synthesize"}
+
+    def __init__(self, app):
+        self.app = app
+        self.gzip = GZipMiddleware(app, minimum_size=1024)
+
+    async def __call__(self, scope, receive, send):
+        path = scope.get("path", "") if scope["type"] == "http" else ""
+        if path.startswith("/api/") and not path.endswith("/stream") and path not in self._UNCOMPRESSED:
+            await self.gzip(scope, receive, send)
+        else:
+            await self.app(scope, receive, send)
+
+
+app.add_middleware(ApiGzipMiddleware)
+
 # 1. Session middleware is added AFTER the custom middlewares so it is outermost (LIFO):
 #    the session scope is populated before the rate limiter runs.
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET_KEY, same_site="lax")
 
-# 2. Google OAuth (only registered when credentials exist; otherwise guest mode)
+# 2. Google OAuth (always on unless AUTH_REQUIRED=false for local development)
 oauth = OAuth()
 if AUTH_REQUIRED:
     oauth.register(

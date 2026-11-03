@@ -154,30 +154,63 @@ class TestServing:
 
 
 class TestDatabaseChoice:
-    """`auto` must not make every start wait for a MySQL server that is not there."""
+    """MySQL is the database: a failure stops the boot instead of falling back to SQLite."""
 
-    def test_auto_falls_back_to_sqlite_without_calling_the_slow_driver(self):
+    def test_mysql_failure_is_raised_not_hidden(self):
         from unittest.mock import patch
         from app.services import database
-        with patch.object(database, "DB_BACKEND", "auto"), patch.object(database, "_mysql_reachable", return_value=False), \
-                patch.object(database, "_init_mysql", side_effect=AssertionError("the driver must not be tried")):
-            assert database.init_db() == "sqlite"
+        with patch.object(database, "DB_BACKEND", "mysql"),                 patch.object(database, "_init_mysql", side_effect=RuntimeError("down")),                 patch.object(database, "_init_sqlite", side_effect=AssertionError("must not fall back")):
+            with pytest.raises(RuntimeError, match="down"):
+                database.init_db()
 
-    def test_auto_still_uses_mysql_when_it_is_reachable(self):
+    def test_unknown_backend_is_rejected(self):
         from unittest.mock import patch
         from app.services import database
-        with patch.object(database, "DB_BACKEND", "auto"), patch.object(database, "_mysql_reachable", return_value=True), \
-                patch.object(database, "_init_mysql", side_effect=RuntimeError("down")) as driver:
-            assert database.init_db() == "sqlite"        # reachable but the driver failed → still falls back
-        assert driver.called
+        with patch.object(database, "DB_BACKEND", "auto"):
+            with pytest.raises(ValueError, match="DB_BACKEND"):
+                database.init_db()
 
-    def test_the_probe_is_fast_and_false_for_a_closed_port(self):
-        from app.services import database
-        from unittest.mock import patch
-        with patch.object(database, "MYSQL_HOST", "127.0.0.1"), patch.object(database, "MYSQL_PORT", 1):
-            t = time.perf_counter()
-            assert database._mysql_reachable(timeout=0.5) is False
-            assert time.perf_counter() - t < 2.0
+
+class TestApiCompression:
+    """JSON answers are gzipped; event streams and audio are not."""
+
+    @staticmethod
+    def _mini_app():
+        from fastapi import FastAPI
+        from fastapi.responses import Response
+        from app.main import ApiGzipMiddleware
+        mini = FastAPI()
+        big = "x" * 5000
+
+        @mini.get("/api/data")
+        def data():
+            return {"blob": big}
+
+        @mini.get("/api/tiny")
+        def tiny():
+            return {"ok": True}
+
+        @mini.get("/api/thing/stream")
+        def stream():
+            return Response(big, media_type="text/event-stream")
+
+        @mini.get("/api/synthesize")
+        def audio():
+            return Response(big, media_type="audio/mpeg")
+
+        mini.add_middleware(ApiGzipMiddleware)
+        return TestClient(mini)
+
+    def test_json_is_gzipped_but_streams_and_audio_are_not(self):
+        mini = self._mini_app()
+        gz = {"Accept-Encoding": "gzip"}
+        assert mini.get("/api/data", headers=gz).headers.get("content-encoding") == "gzip"
+        assert "content-encoding" not in mini.get("/api/thing/stream", headers=gz).headers
+        assert "content-encoding" not in mini.get("/api/synthesize", headers=gz).headers
+
+    def test_small_json_is_left_alone(self):
+        res = self._mini_app().get("/api/tiny", headers={"Accept-Encoding": "gzip"})
+        assert res.status_code == 200 and "content-encoding" not in res.headers
 
 
 class TestStartupWarmup:

@@ -8,6 +8,7 @@ the Azure connection so the first performance does not pay for the handshake.
 
 import asyncio
 import os
+import time
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -61,9 +62,21 @@ async def synthesize_speech(request: SynthesizeRequest, raw_request: Request):
     )
 
 
+# Each warm-up plays a short sound on every pooled synthesizer, which Azure bills.
+# One warm-up per window serves every user, however often the endpoint is called.
+WARM_COOLDOWN_SECONDS = 30
+_warm_lock = asyncio.Lock()
+_last_warm = 0.0
+
+
 @router.post("/warm")
 async def warm_voice():
     """Open the Azure connections ahead of use (the page calls this when the user starts typing)."""
+    global _last_warm
     if not AZURE_SPEECH_KEY:
         return {"warmed": 0}
+    async with _warm_lock:
+        if time.monotonic() - _last_warm < WARM_COOLDOWN_SECONDS:
+            return {"warmed": 0, "skipped": "recently warmed"}
+        _last_warm = time.monotonic()
     return {"warmed": await asyncio.to_thread(_synth_pool.warm, TTS_POOL_SIZE)}

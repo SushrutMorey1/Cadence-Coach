@@ -5,8 +5,8 @@ Every tunable lives here. Nothing else in the app reads os.environ
 directly, so the full surface of configuration is visible in one file.
 
 The stack is deliberately small: Groq (LLM + Whisper) and Azure Neural
-TTS. Optional pieces (Google OAuth, MySQL) degrade gracefully — the app
-boots in guest mode on SQLite when they are not configured.
+TTS, with MySQL and Google sign-in. Missing required configuration stops
+the boot instead of silently degrading.
 """
 
 import os
@@ -41,7 +41,7 @@ def drop_comment_values(values: dict, environ) -> list:
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if not os.getenv("CADENCE_SKIP_DOTENV"):
     _ENV_FILE = PROJECT_ROOT / ".env"
-    load_dotenv(_ENV_FILE, override=True)
+    load_dotenv(_ENV_FILE)  # real environment variables win over .env
     _ignored = drop_comment_values(dotenv_values(_ENV_FILE), os.environ)
     if _ignored:
         logger.warning(
@@ -105,15 +105,19 @@ SESSION_SECRET_KEY = os.getenv("SESSION_SECRET_KEY") or secrets.token_hex(32)
 if not os.getenv("SESSION_SECRET_KEY"):
     logger.warning("SESSION_SECRET_KEY not set — generated an ephemeral key (sessions reset on restart).")
 
-# Google sign-in is only enforced when credentials exist. Without them the
-# app runs in guest mode so a demo never blocks on OAuth setup.
-AUTH_REQUIRED = _env_bool("AUTH_REQUIRED", bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET))
+# Google sign-in is required: the signed-in email is the rate-limit and history key.
+# AUTH_REQUIRED=false opens a guest mode for local development and the test suite only.
+AUTH_REQUIRED = _env_bool("AUTH_REQUIRED", True)
+if AUTH_REQUIRED and not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET):
+    raise RuntimeError(
+        "Google sign-in is required but GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET are not set. "
+        "Set them, or set AUTH_REQUIRED=false for local development only."
+    )
 
 # ── Database ────────────────────────────────────────────────────────
-# auto   → try MySQL, fall back to SQLite if unreachable
-# mysql  → MySQL only (raise on failure)
-# sqlite → SQLite only (zero-infra local dev / demo)
-DB_BACKEND = os.getenv("DB_BACKEND", "auto").lower()
+# mysql  → the database (default). Boot fails if it is unreachable — never a silent fallback.
+# sqlite → offline test suite only; must be set explicitly.
+DB_BACKEND = os.getenv("DB_BACKEND", "mysql").lower()
 SQLITE_PATH = Path(os.getenv("SQLITE_PATH", str(DATA_DIR / "cadence.db")))
 MYSQL_HOST = os.getenv("MYSQL_HOST", "localhost")
 MYSQL_PORT = int(os.getenv("MYSQL_PORT", "3306"))

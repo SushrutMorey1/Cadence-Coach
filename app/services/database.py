@@ -1,10 +1,10 @@
 """
 database.py — Dual-backend Database Layer (MySQL / SQLite)
 ==============================================================
-Production runs on MySQL (connection pool). Local dev, tests and demos
-run on SQLite with zero infrastructure. The backend is chosen at startup
-(see `init_db`) and every query goes through the same async helpers, so
-callers never care which one is active.
+MySQL (connection pool) is the database. SQLite exists only so the test
+suite runs offline, and only when DB_BACKEND=sqlite is set explicitly.
+Every query goes through the same async helpers, so callers never care
+which one is active.
 
 All blocking driver calls are offloaded with `asyncio.to_thread()` so
 the FastAPI event loop is never blocked.
@@ -19,10 +19,8 @@ Portability rules for callers:
 import re
 import asyncio
 import logging
-import socket
 import sqlite3
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from typing import Optional
 
@@ -219,61 +217,25 @@ _COLUMN_MIGRATIONS = {
 # Initialisation
 # ═══════════════════════════════════════════════════════════════
 
-_LOOPBACK = {"localhost", "127.0.0.1", "::1"}
-
-
-def _mysql_reachable(timeout: Optional[float] = None) -> bool:
-    """
-    Is anything listening where MySQL should be?
-
-    A refused local connection makes the MySQL driver retry for ~4 s on Windows (each
-    refused attempt alone takes ~2 s), and `auto` mode paid that on every start and every
-    dev reload. A plain TCP probe, trying every address of the host at once, settles it
-    quickly: a loopback server answers in milliseconds, so a short timeout cannot give a
-    false "down"; a remote one gets longer.
-    """
-    timeout = timeout if timeout is not None else (0.25 if MYSQL_HOST in _LOOPBACK else 1.5)
-    try:
-        addresses = socket.getaddrinfo(MYSQL_HOST, MYSQL_PORT, type=socket.SOCK_STREAM)
-    except OSError:
-        return False
-
-    def attempt(address) -> bool:
-        family, kind, proto, _, target = address
-        try:
-            with socket.socket(family, kind, proto) as probe:
-                probe.settimeout(timeout)
-                probe.connect(target)
-            return True
-        except OSError:
-            return False
-
-    with ThreadPoolExecutor(max_workers=len(addresses)) as pool:
-        return any(pool.map(attempt, addresses))
-
-
 def init_db() -> str:
     """Pick a backend, create the schema, and return the backend name."""
     global _backend
 
-    if DB_BACKEND == "auto" and not _mysql_reachable():
-        logger.info("MySQL not reachable at %s:%s — using SQLite at %s", MYSQL_HOST, MYSQL_PORT, SQLITE_PATH)
-    elif DB_BACKEND in ("auto", "mysql"):
-        try:
-            _init_mysql()
-            _backend = "mysql"
-            _create_tables()
-            logger.info("Database backend: MySQL (%s:%s/%s)", MYSQL_HOST, MYSQL_PORT, MYSQL_DATABASE)
-            return _backend
-        except Exception as err:
-            if DB_BACKEND == "mysql":
-                raise
-            logger.warning("MySQL unavailable (%s) — falling back to SQLite at %s", err, SQLITE_PATH)
+    if DB_BACKEND == "sqlite":
+        _init_sqlite()
+        _backend = "sqlite"
+        _create_tables()
+        logger.info("Database backend: SQLite (%s)", SQLITE_PATH)
+        return _backend
 
-    _init_sqlite()
-    _backend = "sqlite"
+    if DB_BACKEND != "mysql":
+        raise ValueError(f"DB_BACKEND must be 'mysql' or 'sqlite', got {DB_BACKEND!r}")
+    # No silent fallback: users, history, metrics and the rate-limit ledger must live in
+    # one shared, persistent database, so a MySQL failure stops the boot.
+    _init_mysql()
+    _backend = "mysql"
     _create_tables()
-    logger.info("Database backend: SQLite (%s)", SQLITE_PATH)
+    logger.info("Database backend: MySQL (%s:%s/%s)", MYSQL_HOST, MYSQL_PORT, MYSQL_DATABASE)
     return _backend
 
 

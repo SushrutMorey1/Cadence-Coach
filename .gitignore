@@ -46,5 +46,6 @@ Thumbs.db
 .coverage
 htmlcov/
 
-# ── Docker ──
-.dockerignore
+
+# ── Quality eval output ──
+evals/out/

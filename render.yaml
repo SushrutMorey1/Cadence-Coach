@@ -7,9 +7,10 @@
 # 3. Connect the repo → Render auto-detects this file
 # 4. Fill in the secret environment variables in the Render dashboard
 #
-# Storage: SQLite inside the container on the free plan, so history and metrics reset
-# on every restart. For persistence use a paid plan with a disk mounted at /app/data,
-# or set DB_BACKEND=mysql and MYSQL_* to bring your own database.
+# Database: MySQL, hosted outside Render (Render's managed databases are PostgreSQL).
+# Put the host, port, user, password and database name of your MySQL server in the
+# MYSQL_* variables. The app will not start without it, so data is never written to a
+# throwaway file inside the container.
 
 services:
   - type: web
@@ -19,9 +20,17 @@ services:
     healthCheckPath: /api/health
     envVars:
       - key: DB_BACKEND
-        value: sqlite
-      - key: SQLITE_PATH
-        value: /app/data/cadence.db
+        value: mysql
+      - key: MYSQL_HOST
+        sync: false
+      - key: MYSQL_PORT
+        sync: false
+      - key: MYSQL_USER
+        sync: false
+      - key: MYSQL_PASSWORD
+        sync: false
+      - key: MYSQL_DATABASE
+        sync: false
       - key: GROQ_API_KEY
         sync: false
       - key: LLM_MODEL

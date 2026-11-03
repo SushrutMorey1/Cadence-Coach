@@ -513,10 +513,10 @@ class _SynthesizerPool:
         """
         Make `count` synthesizers ready AND connected; returns how many connected.
 
-        Idempotent and cheap to repeat: the page calls this when the user starts
-        typing so the handshake is already paid for when they press the button.
-        Each synthesizer is built and connected in its own thread (building one takes
-        ~0.8 s, so doing them one after another would triple the wait).
+        Idempotent: the page calls this when the user starts typing so the
+        handshake is already paid for when they press the button. Each one connects
+        in its own thread, so the handshakes overlap; building them is serialised by
+        `_build_lock` (see `_build`).
         """
         self._ensure_config()
         count = max(1, min(count, self._max_size))

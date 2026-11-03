@@ -55,6 +55,7 @@ def test_config_treats_comment_value_as_unset(tmp_path):
         AZURE_SPEECH_KEY=                        # your Azure key
         GOOGLE_CLIENT_ID=client-id
         GOOGLE_CLIENT_SECRET=   # the secret
+        AUTH_REQUIRED=false
     """), encoding="utf-8")
     code = ("from app import config; s = config.integration_status(); "
             "print(s['groq'], s['azure_tts'], s['google_oauth'], repr(config.AZURE_SPEECH_KEY))")
@@ -68,3 +69,33 @@ def test_config_treats_comment_value_as_unset(tmp_path):
     assert "Ignoring .env entries" in out.stderr
     assert "AZURE_SPEECH_KEY" in out.stderr and "GOOGLE_CLIENT_SECRET" in out.stderr
     assert "real-groq" not in out.stderr                      # never log values
+
+
+def _fresh_config(tmp_path, dotenv: str, extra_env: dict, code: str):
+    """Import the real config module in a fresh interpreter against a throw-away .env."""
+    project = tmp_path / "proj"
+    (project / "app").mkdir(parents=True)
+    (project / "app" / "config.py").write_text((ROOT / "app" / "config.py").read_text(encoding="utf-8"), encoding="utf-8")
+    (project / "app" / "__init__.py").write_text("")
+    (project / ".env").write_text(textwrap.dedent(dotenv), encoding="utf-8")
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("AZURE_", "GOOGLE_", "GROQ_", "AUTH_", "DB_")) and k != "CADENCE_SKIP_DOTENV"}
+    return subprocess.run([sys.executable, "-c", code], cwd=project,
+                          env={**env, **extra_env, "PYTHONPATH": str(project)},
+                          capture_output=True, text=True, timeout=60)
+
+
+def test_boot_refuses_to_run_without_google_sign_in(tmp_path):
+    """No silent guest mode: missing OAuth keys stop the boot unless AUTH_REQUIRED=false."""
+    out = _fresh_config(tmp_path, "GROQ_API_KEY=k\n", {}, "from app import config")
+    assert out.returncode != 0 and "GOOGLE_CLIENT_ID" in out.stderr
+
+
+def test_real_environment_beats_dotenv_and_mysql_is_the_default(tmp_path):
+    out = _fresh_config(tmp_path, """\
+        GOOGLE_CLIENT_ID=from-file
+        GOOGLE_CLIENT_SECRET=secret
+    """, {"GOOGLE_CLIENT_ID": "from-env"},
+        "from app import config; print(config.GOOGLE_CLIENT_ID, config.AUTH_REQUIRED, config.DB_BACKEND)")
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.split() == ["from-env", "True", "mysql"]

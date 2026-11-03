@@ -593,9 +593,17 @@ class TestSynthesizeRoutes:
         assert res.status_code == 502
 
     def test_warm_opens_the_pool(self):
-        with patch("app.routes.synthesize._synth_pool.warm", return_value=3) as warm:
+        with patch("app.routes.synthesize._last_warm", 0.0),                 patch("app.routes.synthesize._synth_pool.warm", return_value=3) as warm:
             res = client.post("/api/warm")
         assert res.status_code == 200 and res.json() == {"warmed": 3} and warm.called
+
+    def test_warm_runs_at_most_once_per_cooldown_for_everyone(self):
+        """Each warm-up is billed by Azure, so repeated calls inside the window do nothing."""
+        with patch("app.routes.synthesize._last_warm", 0.0),                 patch("app.routes.synthesize._synth_pool.warm", return_value=3) as warm:
+            first = client.post("/api/warm").json()
+            again = [client.post("/api/warm").json() for _ in range(5)]
+        assert first == {"warmed": 3} and warm.call_count == 1
+        assert all(r["warmed"] == 0 for r in again)
 
 
 class TestCleanupAudio:

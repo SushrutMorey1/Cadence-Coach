@@ -4,10 +4,7 @@
    with the app shell in js/main.js. Vanilla JS — zero dependencies.
    ═══════════════════════════════════════════════════════════════ */
 
-import { esc, toast, scoreColor, fmtMs } from './js/ui.js';
-
-// ── DOM Helpers ───────────────────────────────────────────
-const $ = (sel) => document.querySelector(sel);
+import { $, esc, toast, scoreColor, fmtMs } from './js/ui.js';
 
 // ── Cached DOM References ────────────────────────────────
 const els = {

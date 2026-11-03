@@ -1,16 +1,13 @@
 version: "3.9"
 
-# Two ways to run:
-#   docker compose up backend            → SQLite, zero infra (demo / dev)
-#   docker compose --profile mysql up    → MySQL-backed (production-like)
+# docker compose up   → MySQL + the app; the app starts only once MySQL is healthy.
 
 services:
-  # ── MySQL Database (optional, profile "mysql") ──
+  # ── MySQL Database ──
   mysql:
     image: mysql:8.0
     container_name: cadence_coach_db
     restart: unless-stopped
-    profiles: ["mysql"]
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:-cadence}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-cadence_coach}
@@ -36,16 +33,18 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      # Falls back to SQLite automatically when MySQL is not running.
-      DB_BACKEND: ${DB_BACKEND:-auto}
+      DB_BACKEND: mysql
       MYSQL_HOST: mysql
       MYSQL_PORT: 3306
-      SQLITE_PATH: /app/data/cadence.db
+      MYSQL_USER: root
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-cadence}
+    depends_on:
+      mysql:
+        condition: service_healthy
     ports:
       - "8000:8000"
     volumes:
       - audio_output:/app/audio_output
-      - app_data:/app/data
     networks:
       - cadence_network
 
@@ -53,8 +52,6 @@ volumes:
   mysql_data:
     driver: local
   audio_output:
-    driver: local
-  app_data:
     driver: local
 
 networks:
