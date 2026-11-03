@@ -16,7 +16,7 @@ POST text + style
                        script finished ─► `script_done`  ·  all pieces finished ─► `audio_done` (+ concatenated MP3)  ·  `done`
 ```
 
-The two halves run as separate tasks and talk to the single SSE response through a queue (`services/director.py`). Because a sentence is handed to the voice as soon as the model has written it, **the first words are heard about a second after the request, regardless of script length** — `audio_segment` events routinely arrive before `script_done`.
+The two halves run as separate tasks and talk to the single SSE response through a queue (`services/director.py`). Because a sentence is handed to the voice as soon as the model has written it, **the first words are heard early, typically one to two seconds after the request, regardless of script length** — `audio_segment` events routinely arrive before `script_done`.
 
 **What the model writes.** One annotated script as plain text (`prompts/voxis.py`): paragraphs separated by blank lines, `<prosody>` / `<emphasis>` / `<break>` tags and `[bracketed director's notes]`. A refusal is exactly one line, `ERROR: <reason>`. There is no JSON: the old two-key format made the model write the script twice, and streaming a string out of partial JSON is fragile. The readable text is the script with annotations stripped, so shown words and spoken words cannot drift.
 
@@ -49,13 +49,13 @@ Every request initialises a trace (`init_traces`) and ends by logging a *cycle* 
 
 ## 4. Prompt budget and Groq rate limits
 
-Groq's free tier allows ~8,000 tokens per minute (prompt + completion; `max_tokens` is *not* charged up front — three 7,000-token requests in a row all succeeded). The old prompts were ~5,000 (Director) and ~3,200 (Coach) tokens, so one Director run left almost no budget for anything else. The compact prompts are ~1,700 and ~1,600, which also lowers time to first token (~0.3–0.6 s instead of 0.7–1.6 s).
+Groq's free tier allows ~8,000 tokens per minute (prompt + completion; `max_tokens` is *not* charged up front — three 7,000-token requests in a row all succeeded). The old prompts were ~5,000 (Director) and ~3,200 (Coach) tokens, so one Director run left almost no budget for anything else. The current prompts are ~2,500 and ~1,600. There is also a limit of 200,000 tokens per model per day, refilling at about 8,300 an hour, or about 70 Director runs. The wait in Groq's 429 message comes from that refill rate.
 
 If a call is rate-limited anyway, the groq SDK's default is to retry silently with backoff — up to ~25 s of dead air. `ChatGroq` is created with `max_retries=0`; `rate_limit_wait_seconds()` reads `retry-after` / `x-ratelimit-reset-tokens` from the 429, streams emit a `rate_limited {wait_s}` event (the UI counts down) and resume. The app's own per-user token budget (`rate_limiter.py`, epoch-based, fails open) is separate and larger.
 
 ## 5. Persistence
 
-`services/database.py` runs the same async API on MySQL (pool) or SQLite (fallback, WAL mode, write lock). Rules: `%s` placeholders (rewritten to `?`), ISO-string timestamps, dialect branches only for upserts. Columns added after a table first shipped are applied by an idempotent `ALTER TABLE` migration at boot.
+`services/database.py` runs the same async API on MySQL (pool, the default; boot fails if it is unreachable) or SQLite (only when `DB_BACKEND=sqlite` is set, for tests and local development; WAL mode, write lock). Rules: `%s` placeholders (rewritten to `?`), ISO-string timestamps, dialect branches only for upserts. Columns added after a table first shipped are applied by an idempotent `ALTER TABLE` migration at boot.
 
 ## 6. Startup
 
@@ -63,7 +63,7 @@ If a call is rate-limited anyway, the groq SDK's default is to retry silently wi
 
 ## 7. Serving
 
-Only the frontend mount is gzipped — text compresses ~4×, while MP3s are already compressed and need Range support for seeking. App files are served with `Cache-Control: no-cache`: the browser keeps its copy but revalidates, and `StaticFiles`' ETag turns that into a 304 when nothing changed, so an edited file is never stale and an unchanged one is never re-downloaded. SSE responses live under `/api` and are never compressed (that would buffer events).
+The frontend mount and the API's JSON answers are gzipped — text compresses ~4×. MP3s are not, since they are already compressed and need Range support for seeking. App files are served with `Cache-Control: no-cache`: the browser keeps its copy but revalidates, and `StaticFiles`' ETag turns that into a 304 when nothing changed, so an edited file is never stale and an unchanged one is never re-downloaded. SSE responses live under `/api` and are never compressed (that would buffer events).
 
 ## 8. Known limits
 
