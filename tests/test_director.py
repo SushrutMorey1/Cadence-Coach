@@ -533,6 +533,20 @@ class TestRewriteStream:
         assert "retry" in kinds and kinds.index("retry") < kinds.index("token")
         second = llm.prompts[1]
         assert isinstance(second, list) and "Reconsider" in second[-1].content      # the first attempt got the plain prompt
+        assert "at full length" in second[-1].content       # a rescued script must not come back as a few bare lines
+
+    def test_input_with_no_letters_is_turned_down_without_calling_the_model(self):
+        llm = FakeStreamLLM(SCRIPT_TEXT)
+        with patch("app.services.llm.get_llm", return_value=llm):
+            res = client.post("/api/rewrite/stream", json={"user_text": "We finished the migration on time.", "target_style": "???///"})
+        events = sse_events(res.text)
+        assert llm.calls == 0 and events[-1]["type"] == "error" and "style" in events[-1]["message"]
+
+    def test_a_style_or_draft_in_another_alphabet_is_not_turned_down(self):
+        from app.services.director import _unusable_input
+        assert _unusable_input("हमारी टीम ने बहुत अच्छा काम किया", "Warm manager") is None
+        assert _unusable_input("We won the contract", "गर्मजोशी भरा प्रबंधक") is None
+        assert _unusable_input("12345 ;;; ???", "Warm manager") is not None
 
     def test_a_refusal_that_repeats_is_shown_after_one_retry(self):
         llm = FakeStreamLLM("ERROR: Please provide some text or a clear instruction.")
@@ -613,6 +627,36 @@ class TestRewriteStream:
 # ══════════════════════════════════════════════
 # Routes: /api/synthesize and /api/warm
 # ══════════════════════════════════════════════
+
+class TestVoxisPrompt:
+    """Guidance the blind comparison showed was lost when the prompt was first compressed."""
+
+    def test_the_prompt_stays_compact(self):
+        from app.prompts.voxis import SYSTEM_PROMPT
+        from app.services.llm import estimate_tokens
+        assert estimate_tokens(SYSTEM_PROMPT) < 2600        # Groq's free tier: every prompt token is paid on every call
+
+    def test_output_is_english_unless_another_language_is_asked_for(self):
+        from app.prompts.voxis import SYSTEM_PROMPT
+        assert "Otherwise write in English whatever language user_text is in" in SYSTEM_PROMPT
+        assert 'asks for another language ("in Hindi", "Hindi mein"), write the whole script in that language' in SYSTEM_PROMPT
+
+    def test_only_certain_facts_are_asked_for(self):
+        # "name at least two facts" made the model invent October 22 for Gandhi Jayanti
+        from app.prompts.voxis import SYSTEM_PROMPT
+        assert "only ones you are certain of" in SYSTEM_PROMPT and "at least two accurate" not in SYSTEM_PROMPT
+
+    def test_most_of_the_shape_example_is_untagged(self):
+        """The model imitates the example more than the rules, so the example must obey them."""
+        import re
+        from app.prompts.voxis import SYSTEM_PROMPT
+        example = SYSTEM_PROMPT.split("Shape example (do not copy its words):")[1].split("## ERRORS")[0]
+        assert len(re.findall(r"<prosody\b", example)) == 1 and len(re.split(r"(?<=[.!?])\s", strip_all_ssml(example))) >= 4
+
+    def test_a_tone_clash_or_missing_detail_is_not_an_error(self):
+        from app.prompts.voxis import SYSTEM_PROMPT
+        assert "A clash between style and content, or a missing detail" in SYSTEM_PROMPT
+
 
 class TestSynthesizeRoutes:
     def test_synthesize_speaks_the_whole_script_through_the_pipeline(self):

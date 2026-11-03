@@ -36,13 +36,17 @@ from app.services.tts import PieceCutter, resolve_voice, strip_all_ssml, synthes
 logger = logging.getLogger(__name__)
 
 _ERROR_RE = re.compile(r"(?i)^\s*error\s*[:\-–—]\s*")
+_LETTER_RE = re.compile(r"[^\W\d_]")        # a letter in any alphabet
 
 # The model sometimes refuses a perfectly good input ("groundnut is a legume, not a nut") on one run and
 # writes the script on the next. A refusal changes nothing the reader has seen, so it is retried once with
 # this reminder; real errors (empty, gibberish, harmful) are refused again and then shown.
 _REFUSAL_RETRY_NOTE = ("Reconsider. Refuse only if user_text is empty, gibberish, not speech content, or promotes "
                        "hate or violence, or target_style is empty or gibberish. Opinions, loose wording, one-sided "
-                       "claims and combined styles are valid: write the annotated script now.")
+                       "claims, combined styles, a style that clashes with the content, missing details and a request "
+                       "for another language are valid: "
+                       "write the complete annotated script now, at full length, with an opening, development and "
+                       "closing line.")
 
 
 class ScriptStream:
@@ -145,6 +149,15 @@ class ScriptStream:
         return "".join(out)
 
 
+def _unusable_input(user_text: str, target_style: str) -> Optional[str]:
+    """Input with no letters at all can be turned down at once, for certain and without spending any tokens."""
+    if not _LETTER_RE.search(user_text or ""):
+        return "The text has no words in it. Please write some speech content or a clear instruction."
+    if not _LETTER_RE.search(target_style or ""):
+        return "The target style has no words in it. Please describe a persona, tone or archetype."
+    return None
+
+
 async def stream_rewrite(
     user_text: str,
     target_style: str,
@@ -153,6 +166,10 @@ async def stream_rewrite(
     user_key: str = "unknown",
 ) -> AsyncGenerator[str, None]:
     """Stream a rewrite as SSE; with speak=True the voice starts while the script is still being written."""
+    problem = _unusable_input(user_text, target_style)
+    if problem:
+        yield sse({"type": "error", "message": problem})
+        return
     init_traces()
     started = time.perf_counter()
     endpoint = "/api/rewrite-and-speak/stream" if speak else "/api/rewrite/stream"
