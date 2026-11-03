@@ -9,6 +9,7 @@ still writing. Everything runs offline against fakes.
 
 import asyncio
 import os
+import re
 import time
 from unittest.mock import patch
 
@@ -21,7 +22,7 @@ from app.services import tts as tts_service
 from app.services.director import ScriptStream
 from app.services.profiler import get_traces, init_traces
 from app.services.tts import (
-    PARAGRAPH_BREAK, PieceCutter, cleanup_audio_output, direct_tts_script, infer_speaking_style,
+    PARAGRAPH_BREAK, PieceCutter, build_ssml, cleanup_audio_output, direct_tts_script, infer_speaking_style,
     split_script, strip_all_ssml, synthesize_pieces,
 )
 from tests.helpers import FakeAzureResult, FakeStreamLLM, remove_audio, sse_events
@@ -40,11 +41,11 @@ def run(coro):
 class TestDirectTtsScript:
     def test_keeps_whitelisted_tags(self):
         frag, stats = direct_tts_script(
-            '<prosody rate="-8%" pitch="-3%">Hello there, friends.</prosody> <break time="350ms"/> '
+            '<prosody rate="-8%" pitch="-3%">Hello there, friends.</prosody> <break time="450ms"/> '
             '<emphasis level="strong">Go</emphasis>.'
         )
         assert '<prosody pitch="-3%" rate="-8%">' in frag or '<prosody rate="-8%" pitch="-3%">' in frag
-        assert '<break time="350ms"/>' in frag
+        assert '<break time="450ms"/>' in frag
         assert '<emphasis level="strong">Go</emphasis>' in frag
         assert stats["tags_kept"] == 3 and stats["fallback"] is False
 
@@ -95,6 +96,44 @@ class TestDirectTtsScript:
     def test_only_tags_falls_back_to_empty(self):
         frag, stats = direct_tts_script('<break time="300ms"/>')
         assert frag == "" and stats["fallback"] is True
+
+
+class TestVoicePacing:
+    """Sentence gaps stay even across pieces, and volume words keep their meaning."""
+
+    def test_volume_words_become_gentle_relative_values(self):
+        assert 'volume="-15%"' in direct_tts_script('<prosody volume="soft">A quiet line for the room.</prosody>')[0]
+        assert 'volume="+15%"' in direct_tts_script('<prosody volume="loud">A strong line for the room.</prosody>')[0]
+        assert 'volume="-25%"' in direct_tts_script('<prosody volume="-80%">Nothing dips further than this.</prosody>')[0]
+        assert "volume" not in direct_tts_script('<prosody rate="-5%" volume="silent">Never a silent line.</prosody>')[0]
+
+    def test_an_intimate_note_is_no_longer_a_jarring_dip(self):
+        frag, _ = direct_tts_script("[intimate tone] Carry that spirit with you today.")
+        assert 'volume="-15%"' in frag and 'volume="soft"' not in frag
+
+    def test_a_routine_break_after_a_sentence_is_dropped(self):
+        frag, _ = direct_tts_script('We ship on Monday. <break time="350ms"/> Three customers already pay us.')
+        assert "<break" not in frag and "We ship on Monday. Three customers" in re.sub(r"\s+", " ", frag)
+        frag, _ = direct_tts_script('<prosody rate="-5%">We ship on Monday.</prosody> <break time="300ms"/> Then we rest.')
+        assert "<break" not in frag
+
+    def test_a_deliberate_beat_and_a_clause_pause_stay(self):
+        assert '<break time="500ms"/>' in direct_tts_script('We ship on Monday. <break time="500ms"/> Then we rest.')[0]
+        assert '<break time="200ms"/>' in direct_tts_script('On Monday, <break time="200ms"/> we ship it.')[0]
+
+    def test_a_paragraph_pause_at_the_start_of_a_piece_stays(self):
+        assert '<break time="400ms"/>' in direct_tts_script('<break time="400ms"/> The next paragraph begins here.')[0]
+
+    def test_every_piece_carries_even_silence(self):
+        ssml = build_ssml("Hello there.", "en-US-DavisNeural", speaking_style="friendly")
+        assert 'type="Sentenceboundary-exact" value="700ms"' in ssml and 'type="Tailing-exact" value="600ms"' in ssml
+        assert 'type="Leading-exact" value="0ms"' in ssml
+        assert ssml.index("mstts:silence") < ssml.index("mstts:express-as")      # must come first inside <voice>
+
+    def test_the_setting_can_hand_pacing_back_to_azure(self):
+        with patch.object(tts_service, "TTS_SENTENCE_GAP_MS", None):
+            assert "mstts:silence" not in build_ssml("Hello there.", "en-US-DavisNeural")
+            assert "<break" in direct_tts_script('We ship on Monday. <break time="350ms"/> Then we rest.')[0]
 
 
 class TestStylePresets:
@@ -296,6 +335,17 @@ def drive(pieces, speak, pause=0.0, **kwargs):
 
 
 class TestPipeline:
+    def test_a_piece_with_only_a_pause_is_skipped_not_reported_as_failed(self):
+        base, calls = f"t_pause_{int(time.time() * 1000)}", []
+        try:
+            events, _ = drive(["First sentence is here now.", '<break time="400ms"/> <break time="500ms"/>', "Second sentence is here now."],
+                              fake_azure(calls), base_name=base)
+            segments = [info for kind, info in events if kind == "segment"]
+            assert [s["index"] for s in segments] == [0, 1] and all(s["ok"] for s in segments) and len(calls) == 2
+            assert events[-1][1]["failed_segments"] == 0
+        finally:
+            remove_audio(f"{base}*.mp3")
+
     def test_pieces_arrive_in_order_even_when_a_later_one_finishes_first(self):
         base, calls = f"t_order_{int(time.time() * 1000)}", []
         try:

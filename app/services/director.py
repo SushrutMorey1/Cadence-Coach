@@ -243,7 +243,7 @@ async def stream_rewrite(
                 yield piece
 
         summary: dict = {}
-        async for kind, info in synthesize_pieces(source(), voice=resolved_voice, target_style=target_style):
+        async for kind, info in synthesize_pieces(source(), voice=resolved_voice, target_style=target_style, content=user_text):
             if kind != "segment":
                 summary = info
             elif info.get("ok"):

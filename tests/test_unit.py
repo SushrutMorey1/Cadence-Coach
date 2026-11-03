@@ -99,9 +99,31 @@ class TestValidStyleForVoice:
         assert result == "cheerful"
 
     def test_unsupported_style_falls_back(self):
-        result = get_valid_style_for_voice("en-US-DavisNeural", "narration-professional")
-        # narration-professional not supported by Davis, should fallback
+        result = get_valid_style_for_voice("en-US-DavisNeural", "empathetic")
+        # empathetic not supported by Davis, should fallback
         assert result in ["friendly", "chat", "cheerful", "hopeful"]
+
+    def test_unsupported_serious_style_uses_no_style(self):
+        # a friendly tone is the wrong mood for these: use the voice's own neutral delivery
+        assert get_valid_style_for_voice("en-US-DavisNeural", "narration-professional") is None
+        assert get_valid_style_for_voice("en-US-DavisNeural", "newscast") is None
+        assert get_valid_style_for_voice("en-US-DavisNeural", None) is None
+
+    def test_styles_that_used_to_fall_through_to_friendly(self):
+        assert infer_speaking_style("Solemn statesman") == ("sad", 0.7)
+        assert infer_speaking_style("Confident startup founder")[0] == "narration-professional"
+        assert infer_speaking_style("Fiery rally speaker")[0] == "excited"
+
+    def test_keywords_match_at_the_start_of_a_word(self):
+        assert infer_speaking_style("Like an ambassador")[0] == "friendly"      # not "sad"
+        assert infer_speaking_style("Trusted adviser")[0] == "friendly"         # not via "ted "
+        assert infer_speaking_style("Someone who enjoys life")[0] == "friendly"  # not via "joy"
+
+    def test_grave_content_overrides_an_energetic_style(self):
+        grave = "our colleague Ramesh passed away last week"
+        assert infer_speaking_style("High-energy hype", grave) == (None, 1.0)
+        assert infer_speaking_style("High-energy hype", "we won the contract")[0] == "excited"
+        assert infer_speaking_style("Warm manager", grave)[0] == "friendly"     # already gentle: left alone
 
     def test_unknown_voice_returns_none(self):
         result = get_valid_style_for_voice("en-US-UnknownVoice", "cheerful")

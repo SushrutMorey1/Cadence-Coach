@@ -73,6 +73,11 @@ AZURE_SPEECH_KEY = os.getenv("AZURE_SPEECH_KEY")
 AZURE_SPEECH_REGION = os.getenv("AZURE_SPEECH_REGION", "centralindia")
 # Pre-warmed synthesizers; also the parallelism of the Director's segment pipeline.
 TTS_POOL_SIZE = int(os.getenv("TTS_POOL_SIZE", "3"))
+# Pause between sentences. Azure's own default is about 0.9 s, and the model's breaks stack on
+# top of it. Much shorter and the pace climbs past the 130-160 wpm the Coach recommends.
+# "off" hands pacing back to Azure and keeps every <break> the model wrote.
+_SENTENCE_GAP = os.getenv("TTS_SENTENCE_GAP_MS", "700").strip()
+TTS_SENTENCE_GAP_MS = int(_SENTENCE_GAP) if _SENTENCE_GAP.isdigit() else None
 
 # ── Paths ───────────────────────────────────────────────────────────
 AUDIO_OUTPUT_DIR = PROJECT_ROOT / "audio_output"

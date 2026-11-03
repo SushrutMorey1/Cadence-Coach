@@ -15,6 +15,7 @@ from app.config import (
     AUDIO_OUTPUT_DIR,
     AUDIO_RETENTION_HOURS,
     TTS_POOL_SIZE,
+    TTS_SENTENCE_GAP_MS,
     VOICES,
     DEFAULT_VOICE,
 )
@@ -110,26 +111,59 @@ _STYLE_KEYWORDS = [
     ("assist",         "assistant",                0.9),
     ("whisper",        "whispering",               1.0),
     ("secret",         "whispering",               0.7),
+    ("solemn",         "sad",                      0.7),
+    ("grave",          "sad",                      0.7),
+    ("mourn",          "sad",                      0.8),
+    ("eulog",          "sad",                      0.8),
+    ("memorial",       "sad",                      0.7),
+    ("remembrance",    "sad",                      0.7),
+    ("statesman",      "narration-professional",   0.8),
+    ("diplomat",       "narration-professional",   0.8),
+    ("confident",      "narration-professional",   0.8),
+    ("founder",        "narration-professional",   0.8),
+    ("ceo",            "narration-professional",   0.8),
+    ("leader",         "narration-professional",   0.8),
+    ("passion",        "excited",                  0.7),
+    ("fiery",          "excited",                  0.8),
+    ("rally",          "excited",                  0.8),
 ]
 
+# Styles that must not read grave content, whatever the requested style says.
+_ENERGETIC_STYLES = {"excited", "cheerful", "shouting"}
+_GRAVE_CONTENT_RE = re.compile(
+    r"\b(passed away|funeral|eulog\w*|in loving memory|condolences?|mourn\w*|bereave\w*|obituary|"
+    r"rest in peace|memorial service)\b", re.I)
+# Where a voice lacks these, a friendly tone is the wrong mood: use its own neutral delivery.
+_SERIOUS_STYLES = {"narration-professional", "newscast", "newscast-casual", "newscast-formal"}
 
-def infer_speaking_style(target_style: str) -> tuple:
-    """Map a target_style description to an Azure speaking style and degree."""
+
+def infer_speaking_style(target_style: str, content: str = "") -> tuple:
+    """
+    Map a target_style description to an Azure speaking style and degree.
+    Keywords match at the start of a word ("sad" must not fire on "ambassador"). Grave
+    `content` overrides an energetic style with no style at all (None).
+    """
     style_lower = target_style.lower() if target_style else ""
+    found = ("friendly", 0.8)
 
     for keyword, style, degree in _STYLE_KEYWORDS:
-        if keyword in style_lower:
-            return (style, degree)
+        if re.search(r"\b" + re.escape(keyword), style_lower):
+            found = (style, degree)
+            break
 
-    return ("friendly", 0.8)
+    if found[0] in _ENERGETIC_STYLES and _GRAVE_CONTENT_RE.search(content or ""):
+        return (None, 1.0)
+    return found
 
 
-def get_valid_style_for_voice(voice: str, desired_style: str) -> Optional[str]:
-    """Check if voice supports the style, otherwise find a fallback."""
+def get_valid_style_for_voice(voice: str, desired_style: Optional[str]) -> Optional[str]:
+    """Check if voice supports the style, otherwise find a fallback (None means no style)."""
     supported = VOICE_STYLES.get(voice, set())
 
     if desired_style in supported:
         return desired_style
+    if desired_style is None or desired_style in _SERIOUS_STYLES:
+        return None
 
     fallbacks = ["friendly", "chat", "cheerful", "hopeful"]
     for fb in fallbacks:
@@ -165,18 +199,22 @@ _TAG_PARTS_RE = re.compile(r"^<\s*(/?)\s*([A-Za-z][\w:.-]*)\s*([^>]*?)\s*(/?)\s*
 _ATTR_RE = re.compile(r"([\w:-]+)\s*=\s*(?:\"([^\"]*)\"|'([^']*)')")
 _PCT_RE = re.compile(r"^([+-]?\d+(?:\.\d+)?)\s*%$")
 _NOTE_RE = re.compile(r"\[([^\[\]\n]{1,60})\]")
+_SENTENCE_TAIL_RE = re.compile(r"[.!?…][\"”’')\]]*(?:&quot;|&apos;)?\s*$")
 # A sentence the note can govern: plain text (no tags/notes) up to a terminator.
 _GOVERNED_RE = re.compile(r"^\s*([^<\[\]]*?[.!?…]+[\"”’)\]]*)(?=\s|$)")
 _CLAUSE_RE = re.compile(r"^\s*([^<\[\]]+?)(?=<|\[|$)", re.S)
 
 _PITCH_LIMIT = 20.0    # percent
 _RATE_LIMIT = 30.0     # percent
-_VOLUME_LIMIT = 50.0   # percent
+_VOLUME_LIMIT = 25.0   # percent
 _BREAK_MIN_MS, _BREAK_MAX_MS = 50, 500
 
 _PITCH_WORDS = {"x-low": -15.0, "low": -8.0, "medium": None, "default": None, "high": 8.0, "x-high": 15.0}
 _RATE_WORDS = {"x-slow": -30.0, "slow": -15.0, "medium": None, "default": None, "fast": 15.0, "x-fast": 30.0}
-_VOLUME_WORDS = {"silent", "x-soft", "soft", "medium", "loud", "x-loud", "default"}
+# Azure's own words are absolute levels: measured against no tag, "soft" is -7.7 dB, a jarring
+# dip in the middle of a sentence, and "loud" is -1.8 dB, quieter rather than louder. These
+# relative values keep the meaning: -15% is -1.5 dB and +15% is +1.3 dB.
+_VOLUME_WORDS = {"x-soft": -25.0, "soft": -15.0, "medium": None, "default": None, "loud": 15.0, "x-loud": 25.0}
 _EMPHASIS_LEVELS = {"reduced", "none", "moderate", "strong"}
 _BREAK_STRENGTHS = {"none", "x-weak", "weak", "medium", "strong", "x-strong"}
 
@@ -230,6 +268,17 @@ def _break_ms(raw: str, stats: dict) -> Optional[int]:
     if clamped != int(ms):
         stats["clamped"] += 1
     return clamped
+
+
+def _stacks_on_sentence_gap(ms: int, emitted: list) -> bool:
+    """
+    The voice already pauses at every sentence end (and a piece always starts after one), so a
+    routine break there would pile on top. Only a deliberate beat of 400 ms or more stays.
+    """
+    if TTS_SENTENCE_GAP_MS is None or ms >= 400:
+        return False
+    spoken = re.sub(r"<[^>]*>", " ", "".join(emitted))
+    return not spoken.strip() or bool(_SENTENCE_TAIL_RE.search(spoken))
 
 
 def _escape_text(text: str) -> str:
@@ -326,6 +375,9 @@ def _sanitize_tags(text: str, stats: dict) -> str:
         if name == "break":
             ms = _break_ms(attrs.get("time", ""), stats)
             strength = attrs.get("strength", "").lower()
+            if ms is not None and _stacks_on_sentence_gap(ms, out):
+                stats["tags_dropped"] += 1
+                continue
             if ms is not None:
                 out.append(f'<break time="{ms}ms"/>')
             elif strength in _BREAK_STRENGTHS:
@@ -339,13 +391,12 @@ def _sanitize_tags(text: str, stats: dict) -> str:
             kept = {}
             pitch = _clamp_pct(attrs.get("pitch", ""), _PITCH_LIMIT, _PITCH_WORDS, stats)
             rate = _clamp_pct(attrs.get("rate", ""), _RATE_LIMIT, _RATE_WORDS, stats)
-            vol_raw = attrs.get("volume", "").strip().lower()
-            volume = vol_raw if vol_raw in _VOLUME_WORDS else _clamp_pct(vol_raw, _VOLUME_LIMIT, None, stats)
+            volume = _clamp_pct(attrs.get("volume", ""), _VOLUME_LIMIT, _VOLUME_WORDS, stats)
             if pitch:
                 kept["pitch"] = pitch
             if rate:
                 kept["rate"] = rate
-            if volume and volume not in ("medium", "default"):
+            if volume:
                 kept["volume"] = volume
             if self_closing:
                 stats["tags_dropped"] += 1
@@ -412,6 +463,20 @@ def direct_tts_script(tts_script: str) -> tuple:
     return fragment, stats
 
 
+def _silence_ssml() -> str:
+    """
+    Even pauses across the whole script. Pieces are rendered separately, so the sentence gap
+    alone leaves about 1 s where two pieces join: the tail has to match it too, less the
+    ~0.1 s a join adds. No lead-in silence also makes the first word start about 0.14 s sooner.
+    """
+    if TTS_SENTENCE_GAP_MS is None:
+        return ""
+    tail = max(0, TTS_SENTENCE_GAP_MS - 100)
+    return (f'<mstts:silence type="Sentenceboundary-exact" value="{TTS_SENTENCE_GAP_MS}ms"/>'
+            f'<mstts:silence type="Tailing-exact" value="{tail}ms"/>'
+            '<mstts:silence type="Leading-exact" value="0ms"/>')
+
+
 def build_ssml(clean_text, voice, speaking_style=None, style_degree=1.0, lang="en-US"):
     """Build the final SSML document with optional express-as wrapping."""
     # Escape ampersands for XML
@@ -431,6 +496,7 @@ def build_ssml(clean_text, voice, speaking_style=None, style_degree=1.0, lang="e
         f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis"'
         f' xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="{lang}">'
         f'<voice name="{voice}">'
+        f'{_silence_ssml()}'
         f'{inner}'
         f'</voice></speak>'
     )
@@ -762,7 +828,7 @@ def _render_piece(index: int, piece: str, voice: str, valid_style, degree: float
 
 
 async def synthesize_pieces(pieces: AsyncIterator[str], voice=DEFAULT_VOICE, target_style=None,
-                            annotate=True, use_style=True, base_name=None):
+                            annotate=True, use_style=True, base_name=None, content=""):
     """
     Async generator over a stream of script pieces (see PieceCutter).
 
@@ -771,10 +837,11 @@ async def synthesize_pieces(pieces: AsyncIterator[str], voice=DEFAULT_VOICE, tar
     ("done", summary) with the concatenated file. Per-piece timings are
     recorded in the request's trace under PIPELINE_SPAN (worker threads must
     not touch the profiler's span stack, so they report back and the event
-    loop records them).
+    loop records them). `content` is what the speech is about: grave content
+    overrides an energetic style.
     """
     if use_style:
-        style, degree = infer_speaking_style(target_style) if target_style else ("friendly", 0.8)
+        style, degree = infer_speaking_style(target_style, content) if target_style else ("friendly", 0.8)
         valid_style = get_valid_style_for_voice(voice, style)
     else:
         valid_style, degree = None, 1.0
@@ -793,6 +860,8 @@ async def synthesize_pieces(pieces: AsyncIterator[str], voice=DEFAULT_VOICE, tar
         try:
             i = 0
             async for piece in pieces:
+                if not strip_all_ssml(piece):
+                    continue        # a break on its own line: nothing to say, and not a failure
                 task = asyncio.create_task(render(i, piece))
                 all_tasks.append(task)
                 await ordered.put(task)
@@ -865,7 +934,8 @@ async def synthesize_pieces(pieces: AsyncIterator[str], voice=DEFAULT_VOICE, tar
     })
 
 
-async def speak_script(tts_script: str, voice=DEFAULT_VOICE, target_style=None, annotate=True, use_style=True) -> dict:
+async def speak_script(tts_script: str, voice=DEFAULT_VOICE, target_style=None, annotate=True, use_style=True,
+                       content: Optional[str] = None) -> dict:
     """Render a whole script through the same pipeline and return the summary (the concatenated file)."""
     pieces = split_script(tts_script)
 
@@ -875,7 +945,7 @@ async def speak_script(tts_script: str, voice=DEFAULT_VOICE, target_style=None, 
 
     result: dict = {}
     async for kind, info in synthesize_pieces(source(), voice=voice, target_style=target_style,
-                                              annotate=annotate, use_style=use_style):
+                                              annotate=annotate, use_style=use_style, content=content or tts_script):
         if kind == "done":
             result = info
     return result
