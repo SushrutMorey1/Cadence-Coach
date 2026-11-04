@@ -1,56 +1,98 @@
-from pathlib import Path
-import os
+"""
+main.py — Cadence Coach Application
+======================================
+FastAPI app wiring: lifespan (database, audio cleanup, TTS warm-up, model
+check), middleware (rate limiting, sessions, static cache policy), Google
+OAuth (required; guest mode only for local development), and the routers for the three tools —
+Speech Director, Communication Coach, Latency Lab.
+"""
+
+import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse, JSONResponse
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from authlib.integrations.starlette_client import OAuth
-from dotenv import load_dotenv
 
-from app.services.database import init_db
+from app.config import (
+    AUDIO_OUTPUT_DIR, PROJECT_ROOT, OAUTH_REDIRECT_URI, SESSION_SECRET_KEY,
+    GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, AUTH_REQUIRED, AZURE_SPEECH_KEY, TTS_POOL_SIZE,
+    LLM_MODEL, WHISPER_MODEL, integration_status,
+)
+from app.services.database import init_db, dialect
 from app.services.user_service import upsert_user
-
 from app.services.rate_limiter import rate_limiter, get_user_key
-from app.config import AUDIO_OUTPUT_DIR, PROJECT_ROOT, OAUTH_REDIRECT_URI
-from app.routes import rewrite, synthesize, voices, coach, transcribe, metrics
-from app.routes import stream
+from app.services.llm import check_model_available, model_status, warm_llm
+from app.routes import synthesize, voices, coach, transcribe, metrics, stream
 
-load_dotenv()
+# uvicorn configures its own loggers but leaves the root logger bare, which
+# hides every INFO line from `app.*`. Give the root a handler once.
+if not logging.getLogger().handlers:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 logger = logging.getLogger(__name__)
+
+APP_VERSION = "3.1.0"
 
 
 # ── Application Lifespan ──
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup/shutdown lifecycle using the modern lifespan pattern."""
-    # Startup
-    init_db()
-    logger.info("Database initialized successfully.")
+    backend = init_db()
+    logger.info("Database initialized (%s).", backend)
+
+    # Generated MP3s are disposable — drop yesterday's takes.
+    try:
+        from app.services.tts import cleanup_audio_output
+        await asyncio.to_thread(cleanup_audio_output)
+    except Exception as err:
+        logger.warning("Audio cleanup skipped: %s", err)
+
+    # Pay the first-request costs now rather than on the user's first click: the Groq client
+    # build + first connection (~1 s) and the Azure connections (~0.4 s on the first sentence).
+    # They are independent, so they run together. Tests and offline runs set STARTUP_CHECKS=0.
+    if os.getenv("STARTUP_CHECKS", "1") != "0":
+        warmups = [check_model_available(), warm_llm()]
+        if AZURE_SPEECH_KEY:
+            from app.services.tts import _synth_pool
+            warmups.append(asyncio.to_thread(_synth_pool.warm, TTS_POOL_SIZE))
+        try:                                        # never let a slow warm-up hold the server hostage
+            for outcome in await asyncio.wait_for(asyncio.gather(*warmups, return_exceptions=True), timeout=20):
+                if isinstance(outcome, Exception):
+                    logger.warning("Startup warm-up step skipped: %s", outcome)
+        except asyncio.TimeoutError:
+            logger.warning("Startup warm-ups were still running after 20 s — continuing without waiting for them.")
+
+    logger.info("Cadence Coach v%s ready. Model: %s · Whisper: %s · Integrations: %s",
+                APP_VERSION, LLM_MODEL, WHISPER_MODEL, integration_status())
     yield
-    # Shutdown (cleanup if needed)
     logger.info("Application shutting down.")
 
 
 app = FastAPI(
     title="Cadence Coach",
     description=(
-        "AI-powered Speech Director & Communication Coach API. "
-        "Rewrite text into polished speech scripts, synthesize audio with "
-        "Azure Neural TTS, transcribe spoken audio with Whisper, and get "
-        "expert coaching feedback — all from one platform."
+        "Three tools for people who have to speak well. The VOXIS Speech Director rewrites "
+        "text into a script written for the ear and performs it with directed Azure Neural "
+        "voices; the Communication Coach scores a speech on six dimensions, grounded in the "
+        "measured delivery of a recording; the Latency Lab shows every hop of every call."
     ),
-    version="2.1.0",
+    version=APP_VERSION,
     lifespan=lifespan,
 )
 
 
-# ── Rate-limiting endpoints (only LLM-consuming routes) ──
-_RATE_LIMITED_PATHS = {"/api/rewrite", "/api/coach", "/api/rewrite-and-speak",
-                      "/api/rewrite/stream", "/api/coach/stream"}
+# ── Rate-limiting endpoints (LLM-consuming HTTP routes) ──
+_RATE_LIMITED_PATHS = {"/api/rewrite/stream", "/api/rewrite-and-speak/stream", "/api/coach/stream"}
+
+# Reachable without signing in: health, and the sign-in flow itself.
+_PUBLIC_API_PATHS = {"/api/health", "/api/auth/login", "/api/auth/callback", "/api/auth/me", "/api/auth/logout"}
 
 
 @app.middleware("http")
@@ -83,22 +125,74 @@ async def rate_limit_middleware(request: Request, call_next):
 
     return await call_next(request)
 
-# 1. Add session middleware AFTER rate_limit_middleware so it is outermost (LIFO)
-#    This ensures the session scope is available when the rate limiter runs.
-app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET_KEY"))
 
-# 2. Configure Google OAuth
+@app.middleware("http")
+async def require_login_middleware(request: Request, call_next):
+    """
+    Every API call that spends Groq or Azure quota, or reads a user's data, needs a
+    signed-in Google account: the email is the rate-limit and history key, so no
+    request can fall back to an IP that a client controls.
+    """
+    path = request.url.path
+    if AUTH_REQUIRED and path.startswith("/api/") and path not in _PUBLIC_API_PATHS:
+        user = request.session.get("user") or {}
+        if not user.get("email"):
+            return JSONResponse(status_code=401, content={"detail": "Sign in with Google to use Cadence Coach."})
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def revalidate_static_middleware(request: Request, call_next):
+    """
+    Always revalidate the app's own files: the browser keeps its copy but asks
+    first, and StaticFiles answers 304 (ETag) when nothing changed. That is one
+    tiny round-trip instead of re-downloading ~120 KB, and an edited file is
+    never served stale.
+    """
+    response = await call_next(request)
+    if request.url.path.endswith((".js", ".css", ".html")) or request.url.path == "/":
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
+class ApiGzipMiddleware:
+    """
+    Gzip the API's JSON answers. Event streams are left alone (compression would
+    buffer them and delay every token), and so is audio, which is already MP3.
+    """
+
+    _UNCOMPRESSED = {"/api/synthesize"}
+
+    def __init__(self, app):
+        self.app = app
+        self.gzip = GZipMiddleware(app, minimum_size=1024)
+
+    async def __call__(self, scope, receive, send):
+        path = scope.get("path", "") if scope["type"] == "http" else ""
+        if path.startswith("/api/") and not path.endswith("/stream") and path not in self._UNCOMPRESSED:
+            await self.gzip(scope, receive, send)
+        else:
+            await self.app(scope, receive, send)
+
+
+app.add_middleware(ApiGzipMiddleware)
+
+# 1. Session middleware is added AFTER the custom middlewares so it is outermost (LIFO):
+#    the session scope is populated before the rate limiter runs.
+app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET_KEY, same_site="lax")
+
+# 2. Google OAuth (always on unless AUTH_REQUIRED=false for local development)
 oauth = OAuth()
-oauth.register(
-    name='google',
-    client_id=os.getenv("GOOGLE_CLIENT_ID"),
-    client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
-    server_metadata_url='https://accounts.google.com/.well-known/openid-configuration',
-    client_kwargs={'scope': 'openid email profile'}
-)
+if AUTH_REQUIRED:
+    oauth.register(
+        name="google",
+        client_id=GOOGLE_CLIENT_ID,
+        client_secret=GOOGLE_CLIENT_SECRET,
+        server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
+        client_kwargs={"scope": "openid email profile"},
+    )
 
 # API routes
-app.include_router(rewrite.router,     prefix="/api", tags=["Rewrite"])
 app.include_router(synthesize.router,  prefix="/api", tags=["Synthesize"])
 app.include_router(voices.router,      prefix="/api", tags=["Voices"])
 app.include_router(coach.router,       prefix="/api", tags=["Coach"])
@@ -109,71 +203,73 @@ app.include_router(stream.router,      prefix="/api", tags=["Streaming"])
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "online", "service": "Cadence Coach", "version": "2.1.0"}
+    return {
+        "status": "online",
+        "service": "Cadence Coach",
+        "version": APP_VERSION,
+        "db": dialect(),
+        "auth_required": AUTH_REQUIRED,
+        "integrations": integration_status(),
+        "llm": model_status(),
+        "whisper_model": WHISPER_MODEL,
+    }
 
 
 # 3. Route to trigger the Google Login Screen
 @app.get("/api/auth/login")
 async def login(request: Request):
+    if not AUTH_REQUIRED:
+        return RedirectResponse(url="/")
     # This URL must exactly match what you put in the Google Cloud Console
     return await oauth.google.authorize_redirect(request, OAUTH_REDIRECT_URI)
+
 
 # 4. Route Google hits after a successful login
 @app.get("/api/auth/callback")
 async def auth_callback(request: Request):
-    # Catch the token from Google
+    if not AUTH_REQUIRED:
+        return RedirectResponse(url="/")
     token = await oauth.google.authorize_access_token(request)
-    user_info = token.get('userinfo')
-    
-    # Save the user info into the encrypted session cookie
+    user_info = token.get("userinfo")
+
     if user_info:
-        request.session['user'] = dict(user_info)
+        request.session["user"] = dict(user_info)
         email = user_info.get("email")
         if email:
-            name = user_info.get("name", "")
-            picture = user_info.get("picture", "")
-            await upsert_user(email, name, picture)
-        
-    # Send them back to your main frontend dashboard
+            await upsert_user(email, user_info.get("name", ""), user_info.get("picture", ""))
+
     return RedirectResponse(url="/")
 
-# 5. Route for your frontend to check if someone is currently logged in
+
+# 5. Route for the frontend to check who is logged in
 @app.get("/api/auth/me")
 async def check_auth(request: Request):
-    user = request.session.get('user')
+    user = request.session.get("user")
     if user:
-        return {"authenticated": True, "user": user}
-    return {"authenticated": False}
+        return {"authenticated": True, "guest": False, "user": user}
+    if not AUTH_REQUIRED:
+        return {"authenticated": True, "guest": True, "user": {"name": "Guest", "email": None, "picture": None}}
+    return {"authenticated": False, "guest": False}
 
 
 # 6. Logout — destroy the session
 @app.post("/api/auth/logout")
 async def logout(request: Request):
-    """Clear the session cookie and log the user out."""
     request.session.clear()
-    return {"authenticated": False, "message": "Logged out successfully."}
+    return {"authenticated": not AUTH_REQUIRED, "message": "Logged out successfully."}
 
 
-# 7. Token usage status for the authenticated user
+# 7. Token usage status for the current user
 @app.get("/api/auth/usage")
 async def token_usage(request: Request):
-    """Return the current user's token consumption within the rate-limit window."""
-    user_key = get_user_key(request)
-    return await rate_limiter.get_usage(user_key)
+    return await rate_limiter.get_usage(get_user_key(request))
 
 
-# Serve audio files
-app.mount(
-    "/audio",
-    StaticFiles(directory=str(AUDIO_OUTPUT_DIR)),
-    name="audio",
-)
+# Serve generated audio files
+app.mount("/audio", StaticFiles(directory=str(AUDIO_OUTPUT_DIR)), name="audio")
 
-# Serve frontend (local dev — Nginx handles this in production)
+# Serve frontend (local dev — Nginx handles this in production). Only this mount is
+# gzipped: text compresses ~4x, while MP3s are already compressed and need Range support.
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
 if FRONTEND_DIR.is_dir():
-    app.mount(
-        "/",
-        StaticFiles(directory=str(FRONTEND_DIR), html=True),
-        name="frontend",
-    )
+    app.mount("/", GZipMiddleware(StaticFiles(directory=str(FRONTEND_DIR), html=True), minimum_size=1024), name="frontend")

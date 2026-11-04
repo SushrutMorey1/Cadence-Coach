@@ -7,9 +7,9 @@ supports parent/child nesting for waterfall-style visualization.
 """
 
 import time
-import sys
 import contextvars
 from contextlib import contextmanager
+from typing import Optional
 
 # Context var holds the trace state for the current async request
 _trace_ctx = contextvars.ContextVar("_trace_ctx", default=None)
@@ -45,8 +45,9 @@ def get_traces() -> list:
     result = list(state.spans)
     if overhead > 0.05:
         result.append({
-            "name": "⚙️ Framework / Routing Overhead",
+            "name": "Framework / Routing Overhead",
             "latency_ms": round(overhead, 3),
+            "start_ms": None,  # not a contiguous span — the gaps between the tracked ones
             "depth": 0,
             "parent": None,
             "category": "overhead",
@@ -72,7 +73,7 @@ def trace(name: str, category: str = "general", **meta):
     state = _trace_ctx.get()
     if state is None:
         # Tracing not initialized — run the block without tracking
-        yield {}
+        yield {"meta": {}}
         return
 
     parent_name = state.stack[-1] if state.stack else None
@@ -89,6 +90,9 @@ def trace(name: str, category: str = "general", **meta):
         state.spans.append({
             "name": name,
             "latency_ms": round(elapsed_ms, 3),
+            # Offset from the start of the request → the Lab can draw a real timeline
+            # (spans are appended on exit, so children precede parents in this list).
+            "start_ms": round((start - state.request_start) * 1000, 3),
             "depth": depth,
             "parent": parent_name,
             "category": category,
@@ -96,16 +100,33 @@ def trace(name: str, category: str = "general", **meta):
         })
 
 
-def trace_sync(name: str, category: str = "general", **meta):
-    """Decorator for synchronous functions."""
-    def decorator(fn):
-        def wrapper(*args, **kwargs):
-            with trace(name, category=category, **meta):
-                return fn(*args, **kwargs)
-        wrapper.__name__ = fn.__name__
-        wrapper.__doc__ = fn.__doc__
-        return wrapper
-    return decorator
+def elapsed_ms() -> Optional[float]:
+    """Milliseconds since this request's trace began (None when tracing is not initialised)."""
+    state = _trace_ctx.get()
+    return None if state is None else (time.perf_counter() - state.request_start) * 1000
+
+
+def add_span(name: str, started: float, ended: float, category: str = "general",
+             parent=..., depth: Optional[int] = None, **meta) -> None:
+    """
+    Record a span that was timed elsewhere (a worker thread, a concurrent task)
+    using perf_counter() timestamps. Work that runs concurrently must not use
+    `trace()` — the shared span stack would interleave — so it reports its
+    timings back and they are recorded here. `parent` and `depth` default to
+    the current stack; pass them explicitly for spans that belong elsewhere.
+    """
+    state = _trace_ctx.get()
+    if state is None:
+        return
+    state.spans.append({
+        "name": name,
+        "latency_ms": round((ended - started) * 1000, 3),
+        "start_ms": round((started - state.request_start) * 1000, 3),
+        "depth": len(state.stack) if depth is None else depth,
+        "parent": (state.stack[-1] if state.stack else None) if parent is ... else parent,
+        "category": category,
+        "meta": dict(meta),
+    })
 
 
 def sizeof_fmt(num_bytes):

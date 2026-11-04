@@ -1,8 +1,11 @@
 import re
+import time
 import uuid
 import asyncio
 import logging
-from typing import Optional
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from typing import AsyncIterator, Optional
 
 import azure.cognitiveservices.speech as speechsdk
 
@@ -10,10 +13,13 @@ from app.config import (
     AZURE_SPEECH_KEY,
     AZURE_SPEECH_REGION,
     AUDIO_OUTPUT_DIR,
+    AUDIO_RETENTION_HOURS,
+    TTS_POOL_SIZE,
+    TTS_SENTENCE_GAP_MS,
     VOICES,
     DEFAULT_VOICE,
 )
-from app.services.profiler import trace, sizeof_fmt
+from app.services.profiler import add_span, elapsed_ms
 from app.utils.retry import sync_retry
 
 logger = logging.getLogger(__name__)
@@ -105,26 +111,59 @@ _STYLE_KEYWORDS = [
     ("assist",         "assistant",                0.9),
     ("whisper",        "whispering",               1.0),
     ("secret",         "whispering",               0.7),
+    ("solemn",         "sad",                      0.7),
+    ("grave",          "sad",                      0.7),
+    ("mourn",          "sad",                      0.8),
+    ("eulog",          "sad",                      0.8),
+    ("memorial",       "sad",                      0.7),
+    ("remembrance",    "sad",                      0.7),
+    ("statesman",      "narration-professional",   0.8),
+    ("diplomat",       "narration-professional",   0.8),
+    ("confident",      "narration-professional",   0.8),
+    ("founder",        "narration-professional",   0.8),
+    ("ceo",            "narration-professional",   0.8),
+    ("leader",         "narration-professional",   0.8),
+    ("passion",        "excited",                  0.7),
+    ("fiery",          "excited",                  0.8),
+    ("rally",          "excited",                  0.8),
 ]
 
+# Styles that must not read grave content, whatever the requested style says.
+_ENERGETIC_STYLES = {"excited", "cheerful", "shouting"}
+_GRAVE_CONTENT_RE = re.compile(
+    r"\b(passed away|funeral|eulog\w*|in loving memory|condolences?|mourn\w*|bereave\w*|obituary|"
+    r"rest in peace|memorial service)\b", re.I)
+# Where a voice lacks these, a friendly tone is the wrong mood: use its own neutral delivery.
+_SERIOUS_STYLES = {"narration-professional", "newscast", "newscast-casual", "newscast-formal"}
 
-def infer_speaking_style(target_style: str) -> tuple:
-    """Map a target_style description to an Azure speaking style and degree."""
+
+def infer_speaking_style(target_style: str, content: str = "") -> tuple:
+    """
+    Map a target_style description to an Azure speaking style and degree.
+    Keywords match at the start of a word ("sad" must not fire on "ambassador"). Grave
+    `content` overrides an energetic style with no style at all (None).
+    """
     style_lower = target_style.lower() if target_style else ""
+    found = ("friendly", 0.8)
 
     for keyword, style, degree in _STYLE_KEYWORDS:
-        if keyword in style_lower:
-            return (style, degree)
+        if re.search(r"\b" + re.escape(keyword), style_lower):
+            found = (style, degree)
+            break
 
-    return ("friendly", 0.8)
+    if found[0] in _ENERGETIC_STYLES and _GRAVE_CONTENT_RE.search(content or ""):
+        return (None, 1.0)
+    return found
 
 
-def get_valid_style_for_voice(voice: str, desired_style: str) -> Optional[str]:
-    """Check if voice supports the style, otherwise find a fallback."""
+def get_valid_style_for_voice(voice: str, desired_style: Optional[str]) -> Optional[str]:
+    """Check if voice supports the style, otherwise find a fallback (None means no style)."""
     supported = VOICE_STYLES.get(voice, set())
 
     if desired_style in supported:
         return desired_style
+    if desired_style is None or desired_style in _SERIOUS_STYLES:
+        return None
 
     fallbacks = ["friendly", "chat", "cheerful", "hopeful"]
     for fb in fallbacks:
@@ -144,69 +183,328 @@ def strip_all_ssml(text: str) -> str:
     return text.strip()
 
 
-def add_paragraph_pauses(text: str) -> str:
-    """Add break pauses between paragraphs."""
-    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-    if len(paragraphs) <= 1:
-        return text
-    return ' <break time="350ms"/> '.join(paragraphs)
+# ── Voice direction ─────────────────────────────────────────
+# VOXIS writes a `tts_script` with gentle prosody tags and bracketed
+# director's notes. Azure rejects anything malformed and silently ignores
+# anything it does not know, so before synthesis we:
+#   1. turn director's notes into prosody on the sentence they govern,
+#   2. keep only a whitelist of tags and clamp every value to a safe range,
+#   3. repair unbalanced tags and prove the fragment parses as XML.
+# If any of that fails the caller falls back to the plain text, so a bad
+# annotation can never cost the user their audio.
+
+_ALLOWED_TAGS = {"prosody", "break", "emphasis", "p", "s"}
+_TAG_RE = re.compile(r"<[^<>]*>")
+_TAG_PARTS_RE = re.compile(r"^<\s*(/?)\s*([A-Za-z][\w:.-]*)\s*([^>]*?)\s*(/?)\s*>$", re.S)
+_ATTR_RE = re.compile(r"([\w:-]+)\s*=\s*(?:\"([^\"]*)\"|'([^']*)')")
+_PCT_RE = re.compile(r"^([+-]?\d+(?:\.\d+)?)\s*%$")
+_NOTE_RE = re.compile(r"\[([^\[\]\n]{1,60})\]")
+_SENTENCE_TAIL_RE = re.compile(r"[.!?…][\"”’')\]]*(?:&quot;|&apos;)?\s*$")
+# A sentence the note can govern: plain text (no tags/notes) up to a terminator.
+_GOVERNED_RE = re.compile(r"^\s*([^<\[\]]*?[.!?…]+[\"”’)\]]*)(?=\s|$)")
+_CLAUSE_RE = re.compile(r"^\s*([^<\[\]]+?)(?=<|\[|$)", re.S)
+
+_PITCH_LIMIT = 20.0    # percent
+_RATE_LIMIT = 30.0     # percent
+_VOLUME_LIMIT = 25.0   # percent
+_BREAK_MIN_MS, _BREAK_MAX_MS = 50, 500
+
+_PITCH_WORDS = {"x-low": -15.0, "low": -8.0, "medium": None, "default": None, "high": 8.0, "x-high": 15.0}
+_RATE_WORDS = {"x-slow": -30.0, "slow": -15.0, "medium": None, "default": None, "fast": 15.0, "x-fast": 30.0}
+# Azure's own words are absolute levels: measured against no tag, "soft" is -7.7 dB, a jarring
+# dip in the middle of a sentence, and "loud" is -1.8 dB, quieter rather than louder. These
+# relative values keep the meaning: -15% is -1.5 dB and +15% is +1.3 dB.
+_VOLUME_WORDS = {"x-soft": -25.0, "soft": -15.0, "medium": None, "default": None, "loud": 15.0, "x-loud": 25.0}
+_EMPHASIS_LEVELS = {"reduced", "none", "moderate", "strong"}
+_BREAK_STRENGTHS = {"none", "x-weak", "weak", "medium", "strong", "x-strong"}
+
+# Director's notes → the prosody applied to the sentence that follows them.
+# Order matters: the first rule whose keyword appears in the note wins.
+_NOTE_RULES = [
+    (("let this land", "let it land", "pause", "beat", "hold", "breathe", "silence"), "break"),
+    (("intimate", "softer", "quiet", "hushed", "whisper", "conspirator", "tender", "gentle"),
+     {"pitch": "-3%", "rate": "-6%", "volume": "soft"}),
+    (("voice drops", "drops", "lower", "deeper", "gravity", "grave", "somber", "serious"),
+     {"pitch": "-4%", "rate": "-6%"}),
+    (("voice rises", "rises", "building", "momentum", "energy", "faster", "excite", "urgent", "accelerat", "crescendo"),
+     {"pitch": "+4%", "rate": "+6%"}),
+    (("smile", "warm", "bright", "lift", "hopeful", "optimis", "playful"), {"pitch": "+3%"}),
+    (("weight", "slow", "deliberate", "emphasis", "stress", "measured", "firm", "land"), {"rate": "-10%"}),
+]
+
+
+def _clamp_pct(raw: str, limit: float, words: Optional[dict] = None, stats: Optional[dict] = None) -> Optional[str]:
+    """Normalise a prosody value to a signed percentage within ±limit, or None to drop it."""
+    value = (raw or "").strip().lower()
+    if not value:
+        return None
+    if words is not None and value in words:
+        mapped = words[value]
+        return None if mapped is None else f"{mapped:+.0f}%"
+    m = _PCT_RE.match(value)
+    if m:
+        num = float(m.group(1))
+    else:
+        try:
+            # Relative multipliers like rate="0.9" → -10%
+            num = (float(value) - 1.0) * 100.0
+        except ValueError:
+            return None
+    clamped = max(-limit, min(limit, num))
+    if stats is not None and abs(clamped - num) > 0.01:
+        stats["clamped"] += 1
+    if abs(clamped) < 0.5:
+        return None
+    return f"{clamped:+.0f}%"
+
+
+def _break_ms(raw: str, stats: dict) -> Optional[int]:
+    value = (raw or "").strip().lower()
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*(ms|s)$", value)
+    if not m:
+        return None
+    ms = float(m.group(1)) * (1000 if m.group(2) == "s" else 1)
+    clamped = int(max(_BREAK_MIN_MS, min(_BREAK_MAX_MS, ms)))
+    if clamped != int(ms):
+        stats["clamped"] += 1
+    return clamped
+
+
+def _stacks_on_sentence_gap(ms: int, emitted: list) -> bool:
+    """
+    The voice already pauses at every sentence end (and a piece always starts after one), so a
+    routine break there would pile on top. Only a deliberate beat of 400 ms or more stays.
+    """
+    if TTS_SENTENCE_GAP_MS is None or ms >= 400:
+        return False
+    spoken = re.sub(r"<[^>]*>", " ", "".join(emitted))
+    return not spoken.strip() or bool(_SENTENCE_TAIL_RE.search(spoken))
+
+
+def _escape_text(text: str) -> str:
+    """Escape plain text for XML without double-escaping existing entities."""
+    text = re.sub(r"&(?!amp;|lt;|gt;|apos;|quot;|#\d+;)", "&amp;", text)
+    return text.replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _apply_director_notes(text: str, stats: dict) -> str:
+    """Convert `[bracketed notes]` into prosody wrapping the sentence they introduce."""
+    out: list = []
+    pos = 0
+    while True:
+        m = _NOTE_RE.search(text, pos)
+        if not m:
+            out.append(text[pos:])
+            break
+        out.append(text[pos:m.start()])
+        note = m.group(1).strip().lower()
+        rest_start = m.end()
+        rule = next((effect for keys, effect in _NOTE_RULES if any(k in note for k in keys)), None)
+        stats["notes"] += 1
+
+        if rule is None:
+            stats["notes_dropped"] += 1
+            pos = rest_start
+            continue
+
+        if rule == "break":
+            # "Let this land": the pause belongs after the sentence it introduces.
+            g = _GOVERNED_RE.match(text[rest_start:])
+            if g and ("land" in note or "hold" in note):
+                out.append(g.group(1) + ' <break time="450ms"/>')
+                pos = rest_start + g.end()
+            else:
+                out.append('<break time="400ms"/>')
+                pos = rest_start
+            continue
+
+        g = _GOVERNED_RE.match(text[rest_start:]) or _CLAUSE_RE.match(text[rest_start:])
+        if g is None or len(g.group(1).split()) < 3:
+            stats["notes_dropped"] += 1
+            pos = rest_start
+            continue
+        attrs = " ".join(f'{k}="{v}"' for k, v in rule.items())
+        out.append(f"<prosody {attrs}>{g.group(1).strip()}</prosody>")
+        pos = rest_start + g.end()
+    return "".join(out)
+
+
+def _sanitize_tags(text: str, stats: dict) -> str:
+    """Whitelist tags, clamp attribute values, balance the tree and escape text."""
+    out: list = []
+    stack: list = []   # [(name, emitted)] — emitted=False means the opener was dropped
+    pos = 0
+    for m in _TAG_RE.finditer(text):
+        out.append(_escape_text(text[pos:m.start()]))
+        pos = m.end()
+        parts = _TAG_PARTS_RE.match(m.group(0).replace("“", '"').replace("”", '"'))
+        if not parts:
+            stats["tags_dropped"] += 1
+            continue
+        closing, name, attr_src, self_closing = parts.group(1) == "/", parts.group(2).lower(), parts.group(3), parts.group(4) == "/"
+
+        if name not in _ALLOWED_TAGS:
+            stats["tags_dropped"] += 1
+            if not closing and not self_closing:
+                stack.append((name, False))
+            elif closing:
+                for i in range(len(stack) - 1, -1, -1):
+                    if stack[i][0] == name:
+                        del stack[i]
+                        break
+            continue
+
+        attrs = {k.lower(): (v1 if v1 is not None else v2) for k, v1, v2 in _ATTR_RE.findall(attr_src)}
+
+        if closing:
+            # Close the nearest matching opener, closing anything left open above it.
+            idx = next((i for i in range(len(stack) - 1, -1, -1) if stack[i][0] == name), None)
+            if idx is None:
+                stats["repaired"] += 1
+                continue
+            for open_name, emitted in reversed(stack[idx + 1:]):
+                if emitted:
+                    out.append(f"</{open_name}>")
+                    stats["repaired"] += 1
+            _, emitted = stack[idx]
+            del stack[idx:]
+            if emitted:
+                out.append(f"</{name}>")
+            continue
+
+        if name == "break":
+            ms = _break_ms(attrs.get("time", ""), stats)
+            strength = attrs.get("strength", "").lower()
+            if ms is not None and _stacks_on_sentence_gap(ms, out):
+                stats["tags_dropped"] += 1
+                continue
+            if ms is not None:
+                out.append(f'<break time="{ms}ms"/>')
+            elif strength in _BREAK_STRENGTHS:
+                out.append(f'<break strength="{strength}"/>')
+            else:
+                out.append('<break time="250ms"/>')
+            stats["tags_kept"] += 1
+            continue
+
+        if name == "prosody":
+            kept = {}
+            pitch = _clamp_pct(attrs.get("pitch", ""), _PITCH_LIMIT, _PITCH_WORDS, stats)
+            rate = _clamp_pct(attrs.get("rate", ""), _RATE_LIMIT, _RATE_WORDS, stats)
+            volume = _clamp_pct(attrs.get("volume", ""), _VOLUME_LIMIT, _VOLUME_WORDS, stats)
+            if pitch:
+                kept["pitch"] = pitch
+            if rate:
+                kept["rate"] = rate
+            if volume:
+                kept["volume"] = volume
+            if self_closing:
+                stats["tags_dropped"] += 1
+                continue
+            if not kept:
+                stats["tags_dropped"] += 1
+                stack.append((name, False))
+                continue
+            out.append("<prosody " + " ".join(f'{k}="{v}"' for k, v in kept.items()) + ">")
+            stack.append((name, True))
+            stats["tags_kept"] += 1
+            continue
+
+        if name == "emphasis":
+            if self_closing:
+                stats["tags_dropped"] += 1
+                continue
+            level = attrs.get("level", "moderate").lower()
+            out.append(f'<emphasis level="{level if level in _EMPHASIS_LEVELS else "moderate"}">')
+            stack.append((name, True))
+            stats["tags_kept"] += 1
+            continue
+
+        # <p> / <s>
+        if self_closing:
+            continue
+        out.append(f"<{name}>")
+        stack.append((name, True))
+        stats["tags_kept"] += 1
+
+    out.append(_escape_text(text[pos:]))
+    for open_name, emitted in reversed(stack):
+        if emitted:
+            out.append(f"</{open_name}>")
+            stats["repaired"] += 1
+    return "".join(out)
+
+
+def direct_tts_script(tts_script: str) -> tuple:
+    """
+    Turn VOXIS's annotated `tts_script` into an SSML fragment Azure will accept.
+
+    Returns (fragment, stats). `fragment` is XML-escaped text with only
+    whitelisted, clamped, balanced tags; `stats["fallback"]` is True when
+    the script could not be made valid and the plain text was used instead.
+    """
+    import xml.etree.ElementTree as ET
+
+    stats = {"notes": 0, "notes_dropped": 0, "tags_kept": 0, "tags_dropped": 0,
+             "clamped": 0, "repaired": 0, "fallback": False}
+    text = tts_script or ""
+    try:
+        fragment = _sanitize_tags(_apply_director_notes(text, stats), stats)
+        fragment = re.sub(r"[ \t]+", " ", fragment)
+        fragment = re.sub(r"\n\s*\n+", "\n\n", fragment).strip()
+        ET.fromstring(f"<speak>{fragment}</speak>")
+    except Exception as err:  # malformed beyond repair → plain read
+        logger.warning("Voice direction rejected (%s) — speaking the plain text instead.", err)
+        stats["fallback"] = True
+        fragment = _escape_text(strip_all_ssml(text))
+    if not re.sub(r"<[^>]+>|\s+", "", fragment):
+        stats["fallback"] = True
+        fragment = _escape_text(strip_all_ssml(text))
+    return fragment, stats
+
+
+def _silence_ssml() -> str:
+    """
+    Even pauses across the whole script. Pieces are rendered separately, so the sentence gap
+    alone leaves about 1 s where two pieces join: the tail has to match it too, less the
+    ~0.1 s a join adds. No lead-in silence also makes the first word start about 0.14 s sooner.
+    """
+    if TTS_SENTENCE_GAP_MS is None:
+        return ""
+    tail = max(0, TTS_SENTENCE_GAP_MS - 100)
+    return (f'<mstts:silence type="Sentenceboundary-exact" value="{TTS_SENTENCE_GAP_MS}ms"/>'
+            f'<mstts:silence type="Tailing-exact" value="{tail}ms"/>'
+            '<mstts:silence type="Leading-exact" value="0ms"/>')
 
 
 def build_ssml(clean_text, voice, speaking_style=None, style_degree=1.0, lang="en-US"):
     """Build the final SSML document with optional express-as wrapping."""
-    text_with_pauses = add_paragraph_pauses(clean_text)
-
     # Escape ampersands for XML
-    text_with_pauses = re.sub(r"&(?!amp;|lt;|gt;|apos;|quot;)", "&amp;", text_with_pauses)
+    text = re.sub(r"&(?!amp;|lt;|gt;|apos;|quot;)", "&amp;", clean_text)
 
     if speaking_style:
         inner = (
             f'<mstts:express-as style="{speaking_style}" '
             f'styledegree="{style_degree:.1f}">'
-            f'{text_with_pauses}'
+            f'{text}'
             f'</mstts:express-as>'
         )
     else:
-        inner = text_with_pauses
+        inner = text
 
     ssml = (
         f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis"'
         f' xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="{lang}">'
         f'<voice name="{voice}">'
+        f'{_silence_ssml()}'
         f'{inner}'
         f'</voice></speak>'
     )
     return ssml
 
 
-def prepare_for_synthesis(text, voice=DEFAULT_VOICE, target_style=None):
-    """Full prep pipeline: strip SSML -> infer style -> validate -> build SSML."""
-    clean_text = strip_all_ssml(text)
-    if not clean_text:
-        return ""
-
-    if target_style:
-        style, degree = infer_speaking_style(target_style)
-    else:
-        style, degree = ("friendly", 0.8)
-
-    valid_style = get_valid_style_for_voice(voice, style)
-
-    logger.info(
-        "TTS: voice=%s, style=%s->%s (degree=%.1f), len=%d",
-        voice, style, valid_style or "(none)", degree, len(clean_text),
-    )
-
-    return build_ssml(
-        clean_text=clean_text,
-        voice=voice,
-        speaking_style=valid_style,
-        style_degree=degree,
-    )
-
-
-def _get_speech_config(output_format=None):
-    """Create Azure SpeechConfig."""
+def _get_speech_config():
+    """Create Azure SpeechConfig (24 kHz mono MP3: small, and what browsers decode fastest)."""
     if not AZURE_SPEECH_KEY:
         raise ValueError("AZURE_SPEECH_KEY not found. Set it in .env.")
 
@@ -214,9 +512,7 @@ def _get_speech_config(output_format=None):
         subscription=AZURE_SPEECH_KEY,
         region=AZURE_SPEECH_REGION,
     )
-    if output_format is None:
-        output_format = speechsdk.SpeechSynthesisOutputFormat.Webm24Khz16BitMonoOpus
-    config.set_speech_synthesis_output_format(output_format)
+    config.set_speech_synthesis_output_format(speechsdk.SpeechSynthesisOutputFormat.Audio24Khz48KBitRateMonoMp3)
     return config
 
 
@@ -225,6 +521,98 @@ def resolve_voice(voice_input):
     if voice_input is None:
         return DEFAULT_VOICE
     return VOICES.get(voice_input, voice_input)
+
+
+# ── Synthesizer Pool (connection reuse) ─────────────────────
+
+_WARMUP_SSML = (
+    '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">'
+    '<voice name="en-US-DavisNeural"><break time="10ms"/>.</voice></speak>'
+)
+
+
+class _SynthesizerPool:
+    """
+    Pool of Azure SpeechSynthesizer instances with their connections kept open.
+
+    Creating a synthesizer is cheap; the TLS + WebSocket handshake to Azure
+    (~0.6 s) happens on its first use unless the connection is opened ahead of
+    time (`warm`). Reusing them also skips that handshake on later requests.
+    Synthesizers use audio_config=None, so callers get the bytes back from
+    result.audio_data and decide where to put them.
+    """
+
+    def __init__(self, max_size: int = 3):
+        self._max_size = max_size
+        self._pool: list = []
+        self._lock = threading.Lock()
+        self._build_lock = threading.Lock()
+        self._speech_config: Optional[speechsdk.SpeechConfig] = None
+
+    def _ensure_config(self):
+        """Lazily create and cache the SpeechConfig."""
+        if self._speech_config is None:
+            self._speech_config = _get_speech_config()
+
+    def acquire(self) -> speechsdk.SpeechSynthesizer:
+        """Get a synthesizer from the pool, or create a new one."""
+        with self._lock:
+            if self._pool:
+                return self._pool.pop()
+
+        self._ensure_config()
+        # The SDK's native constructor is not safe to run in several threads at once: with a starved
+        # CPU (Render's free plan) three at once segfaulted the whole server. Build one at a time.
+        with self._build_lock:
+            return speechsdk.SpeechSynthesizer(
+                speech_config=self._speech_config,
+                audio_config=None,
+            )
+
+    def release(self, synthesizer: speechsdk.SpeechSynthesizer):
+        """Return a healthy synthesizer to the pool for reuse (excess ones are discarded)."""
+        with self._lock:
+            if len(self._pool) < self._max_size:
+                self._pool.append(synthesizer)
+
+    def warm(self, count: int = 1) -> int:
+        """
+        Make `count` synthesizers ready AND connected; returns how many connected.
+
+        Idempotent: the page calls this when the user starts typing so the
+        handshake is already paid for when they press the button. Each one connects
+        in its own thread, so the handshakes overlap; building them is serialised by
+        `_build_lock` (see `_build`).
+        """
+        self._ensure_config()
+        count = max(1, min(count, self._max_size))
+
+        def ready_and_connected(_) -> bool:
+            synth = self.acquire()
+            try:
+                # One short sound opens the connection the same way a real request would.
+                # (Connection.open() is the obvious call but it segfaults the whole process
+                # on Linux when the CPU is starved — Render's free plan — so it is not used.)
+                result = synth.speak_ssml_async(_WARMUP_SSML).get()
+                connected = result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted
+            except Exception as err:
+                logger.warning("Could not pre-open the Azure connection: %s", err)
+                connected = False
+            self.release(synth)
+            return connected
+
+        with ThreadPoolExecutor(max_workers=count) as pool:
+            opened = sum(pool.map(ready_and_connected, range(count)))
+        logger.info("Warmed %d synthesizer(s); %d connection(s) open", count, opened)
+        return opened
+
+    @property
+    def size(self) -> int:
+        with self._lock:
+            return len(self._pool)
+
+
+_synth_pool = _SynthesizerPool(max_size=max(1, TTS_POOL_SIZE))
 
 
 @sync_retry(
@@ -247,116 +635,336 @@ def _azure_tts_call(synthesizer, ssml):
     return result
 
 
-def synthesize_to_file(tts_script, voice=DEFAULT_VOICE, target_style=None, filename=None, output_format=None):
-    """Text -> clean -> express-as -> Azure TTS -> audio file. Deep profiled."""
-
-    # Step 1: Strip SSML tags from input
-    with trace("Strip SSML Tags", category="compute") as span:
-        clean_text = strip_all_ssml(tts_script)
-        span["meta"]["input_chars"] = len(tts_script)
-        span["meta"]["clean_chars"] = len(clean_text)
-        span["meta"]["stripped_chars"] = len(tts_script) - len(clean_text)
-
-    if not clean_text:
-        return {"success": False, "file_path": None, "duration": None, "message": "Text is empty after processing."}
-
-    # Step 2: Infer speaking style
-    with trace("Infer Speaking Style", category="compute",
-                target_style=target_style or "(none)") as span:
-        if target_style:
-            style, degree = infer_speaking_style(target_style)
-        else:
-            style, degree = ("friendly", 0.8)
-        valid_style = get_valid_style_for_voice(voice, style)
-        span["meta"]["inferred_style"] = style
-        span["meta"]["valid_style"] = valid_style or "(none — unsupported)"
-        span["meta"]["style_degree"] = degree
-        span["meta"]["voice"] = voice
-
-    # Step 3: Build SSML XML
-    with trace("Build SSML XML", category="compute") as span:
-        ssml = build_ssml(
-            clean_text=clean_text,
-            voice=voice,
-            speaking_style=valid_style,
-            style_degree=degree,
-        )
-        span["meta"]["ssml_chars"] = len(ssml) if ssml else 0
-        span["meta"]["ssml_size"] = sizeof_fmt(len(ssml.encode("utf-8"))) if ssml else "0 B"
-
-    if not ssml:
-        return {"success": False, "file_path": None, "duration": None, "message": "SSML generation failed."}
-
-    # Step 4: Initialize Azure Speech Config
-    with trace("Azure Speech Config Init", category="io") as span:
-        speech_config = _get_speech_config(output_format)
-        span["meta"]["region"] = AZURE_SPEECH_REGION
-        span["meta"]["output_format"] = str(output_format or "Webm24Khz16BitMonoOpus")
-
-    # Step 5: Initialize Synthesizer
-    with trace("Azure Synthesizer Init", category="io") as span:
-        if filename is None:
-            filename = f"cadence_coach_{uuid.uuid4().hex[:8]}.webm"
-        file_path = AUDIO_OUTPUT_DIR / filename
-        audio_config = speechsdk.audio.AudioOutputConfig(filename=str(file_path))
-        synthesizer = speechsdk.SpeechSynthesizer(
-            speech_config=speech_config,
-            audio_config=audio_config,
-        )
-        span["meta"]["output_file"] = filename
-        span["meta"]["output_path"] = str(file_path)
-
-    # Step 6: Azure TTS Network Call (with retry on transient errors)
-    with trace("Azure TTS Network Call", category="network",
-                voice=voice, style=valid_style or "default") as span:
+def _speak_ssml(ssml):
+    """One synthesis call on a pooled synthesizer; the synthesizer goes back only if it worked."""
+    synthesizer = _synth_pool.acquire()
+    ok = False
+    try:
         result = _azure_tts_call(synthesizer, ssml)
-        span["meta"]["result_reason"] = str(result.reason)
-
-    if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
-        duration = result.audio_duration.total_seconds() if result.audio_duration else None
-        logger.info("Audio saved to %s (%.1fs)", file_path, duration or 0)
-        return {
-            "success": True,
-            "file_path": str(file_path.resolve()),
-            "filename": filename,
-            "duration": duration,
-            "message": "Audio synthesized successfully.",
-            "voice": voice,
-            "char_count": len(clean_text),
-        }
-
-    elif result.reason == speechsdk.ResultReason.Canceled:
-        cd = result.cancellation_details
-        msg = f"Speech synthesis canceled: {cd.reason}. "
-        if cd.reason == speechsdk.CancellationReason.Error:
-            msg += f"Error: {cd.error_code}. {cd.error_details}"
-        logger.error(msg)
-        return {
-            "success": False, "file_path": None, "duration": None, "message": msg,
-            "voice": voice, "char_count": len(clean_text),
-        }
-
-    return {
-        "success": False, "file_path": None, "duration": None,
-        "message": f"Unexpected: {result.reason}",
-        "voice": voice, "char_count": len(clean_text),
-    }
+        ok = result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted
+        return result
+    finally:
+        if ok:
+            _synth_pool.release(synthesizer)
+        else:
+            logger.warning("Discarding synthesizer after failed TTS call")  # its connection may be broken
 
 
-async def async_synthesize_to_file(tts_script, voice=DEFAULT_VOICE, target_style=None, filename=None, output_format=None):
-    """Async wrapper: runs TTS synthesis in a thread pool, then logs metrics asynchronously."""
-    from app.services.metrics import log_tts_call
+# ── Speaking a script in pieces ─────────────────────────────────────
+# One Azure call renders a 200-word script in 3–5 s and nothing can play until it
+# returns. So the script is cut into pieces — the first one a single sentence —
+# and the pieces are rendered in parallel (bounded by the synthesizer pool).
+# They are handed back in order as they finish and the browser plays them back
+# to back, so the first words are heard about a second after the first sentence
+# exists. Because the cutter is incremental, that sentence can be the first one
+# the *model* has written, while it is still writing the rest.
 
-    result = await asyncio.to_thread(
-        synthesize_to_file, tts_script, voice, target_style, filename, output_format
-    )
+FIRST_PIECE_MIN_CHARS = 40
+PIECE_TARGET_CHARS = (FIRST_PIECE_MIN_CHARS, 220, 380)   # a short first piece, then bigger ones
+PARAGRAPH_BREAK = '<break time="400ms"/> '
+PIPELINE_SPAN = "Speech Synthesis Pipeline"
 
-    # Log TTS metrics asynchronously (not blocking)
-    tts_voice = result.get("voice", voice)
-    char_count = result.get("char_count", 0)
-    if result["success"]:
-        await log_tts_call(voice=tts_voice, char_count=char_count, duration_sec=result.get("duration"), status="success")
+_SPLIT_TAG_RE = re.compile(r"<[^<>]*>|<|[^<]+")      # total: no character is ever skipped
+_OPENING_TAGS = ("prosody", "emphasis", "p", "s")
+_SENT_END_RE = re.compile(r"[.!?…]+[\"”’)\]]*(?=\s)")
+_CLOSE_AFTER_SENTENCE_RE = re.compile(r"[.!?…][\"”’)\]]*\s*</[^>]+>$")
+_PARAGRAPH_RE = re.compile(r"\n[ \t]*\n\s*")
+
+
+def _scan(text: str) -> tuple:
+    """
+    Split `text` into complete sentences plus the unfinished remainder.
+
+    A sentence ends at . ! ? … followed by whitespace, or at a closing tag that
+    ends one — and only at tag depth 0, so a <prosody> span never straddles two
+    sentences. The remainder keeps its original whitespace so more text can be
+    appended to it later.
+    """
+    # A tag can arrive in pieces ("<pros", "ody rate=…>"): hold an unfinished trailing tag
+    # back rather than treating it as text, or the model's annotation would be spoken aloud.
+    partial = ""
+    cut = text.rfind("<")
+    if cut != -1 and ">" not in text[cut:] and len(text) - cut <= 160:
+        text, partial = text[:cut], text[cut:]
+    out, buf, depth = [], "", 0
+    for m in _SPLIT_TAG_RE.finditer(text):
+        tok = m.group(0)
+        if tok.startswith("<") and tok.endswith(">"):
+            name = re.match(r"</?\s*([A-Za-z]+)", tok)
+            tag = name.group(1).lower() if name else ""
+            if tag in _OPENING_TAGS and not tok.endswith("/>"):
+                depth = max(0, depth + (-1 if tok.startswith("</") else 1))
+            buf += tok
+            if depth == 0 and tok.startswith("</") and _CLOSE_AFTER_SENTENCE_RE.search(buf):
+                out.append(buf.strip())
+                buf = ""
+            continue
+        if depth > 0:
+            buf += tok
+            continue
+        pos = 0
+        for end in _SENT_END_RE.finditer(tok):
+            buf += tok[pos:end.end()]
+            out.append(buf.strip())
+            buf, pos = "", end.end()
+        buf += tok[pos:]
+    return [s for s in out if s], buf + partial
+
+
+def _visible_len(text: str) -> int:
+    """Length of the words that will actually be spoken (tags and notes excluded)."""
+    return len(re.sub(r"<[^>]*>|\[[^\]]*\]", "", text).strip())
+
+
+class PieceCutter:
+    """
+    Cut an annotated script into speakable pieces, incrementally.
+
+    feed() takes text as it arrives and returns the pieces that became ready;
+    flush() returns the rest. Piece sizes grow (PIECE_TARGET_CHARS): the first is
+    about one sentence so audio starts fast, later ones are bigger to keep
+    prosody natural and round-trips few. A paragraph break always ends a piece
+    and starts the next with a pause.
+    """
+
+    def __init__(self, targets=PIECE_TARGET_CHARS):
+        self._targets = targets
+        self._tail = ""                 # received but not yet part of a finished sentence
+        self._cur = ""                  # the piece being assembled
+        self._made = 0                  # pieces handed out so far
+        self._new_paragraph = False     # the next piece opens a paragraph
+
+    def feed(self, text: str) -> list:
+        self._tail += text
+        return self._cut(final=False)
+
+    def flush(self) -> list:
+        return self._cut(final=True)
+
+    def _target(self) -> int:
+        return self._targets[min(self._made, len(self._targets) - 1)]
+
+    def _take(self) -> str:
+        piece, self._cur = self._cur.strip(), ""
+        if not piece:
+            return ""
+        if self._new_paragraph:
+            piece, self._new_paragraph = PARAGRAPH_BREAK + piece, False
+        self._made += 1
+        return piece
+
+    def _add(self, sentence: str, out: list) -> None:
+        self._cur = f"{self._cur} {sentence}".strip() if self._cur else sentence
+        if _visible_len(self._cur) >= self._target():
+            out.append(self._take())
+
+    def _cut(self, final: bool) -> list:
+        out: list = []
+        while True:                                       # paragraph breaks are boundaries of their own
+            m = _PARAGRAPH_RE.search(self._tail)
+            if not m:
+                break
+            paragraph, self._tail = self._tail[:m.start()], self._tail[m.end():]
+            sentences, rest = _scan(paragraph)
+            for sentence in sentences + ([rest.strip()] if rest.strip() else []):
+                self._add(sentence, out)
+            piece = self._take()
+            if piece:
+                out.append(piece)
+            self._new_paragraph = True
+        sentences, self._tail = _scan(self._tail)
+        for sentence in sentences:
+            self._add(sentence, out)
+        if final:
+            if self._tail.strip():
+                self._add(self._tail.strip(), out)
+            self._tail = ""
+            piece = self._take()
+            if piece:
+                out.append(piece)
+        return out
+
+
+def split_script(tts_script: str, targets=PIECE_TARGET_CHARS) -> list:
+    """Cut a whole script at once (the same logic the stream uses)."""
+    cutter = PieceCutter(targets)
+    return cutter.feed(tts_script or "") + cutter.flush()
+
+
+def _render_piece(index: int, piece: str, voice: str, valid_style, degree: float, annotate: bool) -> dict:
+    """Synthesize one piece in a worker thread; returns the bytes and its timings."""
+    t0 = time.perf_counter()
+    clean = strip_all_ssml(piece)
+    plain_fragment = _escape_text(clean)
+    if annotate:
+        fragment, direction = direct_tts_script(piece)
     else:
-        await log_tts_call(voice=tts_voice, char_count=char_count, status=f"failed: {result.get('message', 'unknown')}")
+        fragment, direction = plain_fragment, {"fallback": False, "tags_kept": 0, "notes": 0, "notes_dropped": 0,
+                                               "tags_dropped": 0, "clamped": 0, "repaired": 0}
+    directed = annotate and not direction.get("fallback") and fragment != plain_fragment
+    info = {"index": index, "chars": len(clean), "directed": directed, "direction": direction,
+            "ok": False, "bytes": b"", "duration": 0.0, "started": t0, "ended": t0, "error": None}
+    if not clean:
+        info["ended"] = time.perf_counter()
+        return info
+    try:
+        ssml = build_ssml(clean_text=fragment, voice=voice, speaking_style=valid_style, style_degree=degree)
+        result = _speak_ssml(ssml)
+        if result.reason == speechsdk.ResultReason.Canceled and directed:
+            logger.warning("Azure rejected directed piece %d — retrying plain.", index + 1)
+            ssml = build_ssml(clean_text=plain_fragment, voice=voice, speaking_style=valid_style, style_degree=degree)
+            result = _speak_ssml(ssml)
+            info["directed"] = False
+        if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
+            info.update(ok=True, bytes=result.audio_data,
+                        duration=result.audio_duration.total_seconds() if result.audio_duration else 0.0)
+        else:
+            cd = getattr(result, "cancellation_details", None)
+            info["error"] = f"{getattr(cd, 'reason', result.reason)}: {getattr(cd, 'error_details', '')}".strip(": ")
+    except Exception as err:
+        info["error"] = f"{type(err).__name__}: {err}"
+    info["ended"] = time.perf_counter()
+    return info
 
+
+async def synthesize_pieces(pieces: AsyncIterator[str], voice=DEFAULT_VOICE, target_style=None,
+                            annotate=True, use_style=True, base_name=None, content=""):
+    """
+    Async generator over a stream of script pieces (see PieceCutter).
+
+    Pieces are rendered in parallel as they arrive — up to the pool size — and
+    yielded in order: ("segment", info) as each one's MP3 lands, then
+    ("done", summary) with the concatenated file. Per-piece timings are
+    recorded in the request's trace under PIPELINE_SPAN (worker threads must
+    not touch the profiler's span stack, so they report back and the event
+    loop records them). `content` is what the speech is about: grave content
+    overrides an energetic style.
+    """
+    if use_style:
+        style, degree = infer_speaking_style(target_style, content) if target_style else ("friendly", 0.8)
+        valid_style = get_valid_style_for_voice(voice, style)
+    else:
+        valid_style, degree = None, 1.0
+
+    base = base_name or f"cadence_coach_{uuid.uuid4().hex[:8]}"
+    sem = asyncio.Semaphore(max(1, TTS_POOL_SIZE))
+    ordered: asyncio.Queue = asyncio.Queue()      # render tasks, in script order
+    all_tasks: list = []
+    began = time.perf_counter()
+
+    async def render(i, piece):
+        async with sem:
+            return await asyncio.to_thread(_render_piece, i, piece, voice, valid_style, degree, annotate)
+
+    async def feed():
+        try:
+            i = 0
+            async for piece in pieces:
+                if not strip_all_ssml(piece):
+                    continue        # a break on its own line: nothing to say, and not a failure
+                task = asyncio.create_task(render(i, piece))
+                all_tasks.append(task)
+                await ordered.put(task)
+                i += 1
+        finally:
+            await ordered.put(None)
+
+    feeder = asyncio.create_task(feed())
+    parts: list = []
+    first_audio_at = None
+    try:
+        while True:
+            task = await ordered.get()
+            if task is None:
+                break
+            info = await task
+            i = info["index"]
+            add_span(f"TTS piece {i + 1}", info["started"], info["ended"], category="network",
+                     parent=PIPELINE_SPAN, depth=1, chars=info["chars"], directed=info["directed"],
+                     ok=info["ok"], audio_sec=round(info["duration"], 2), error=info["error"] or "")
+            parts.append(info)
+            if not info["ok"]:
+                yield ("segment", {"index": i, "ok": False, "error": info["error"]})
+                continue
+            filename = f"{base}_{i + 1:02d}.mp3"
+            await asyncio.to_thread((AUDIO_OUTPUT_DIR / filename).write_bytes, info["bytes"])
+            if first_audio_at is None:
+                first_audio_at = time.perf_counter()
+            yield ("segment", {"index": i, "ok": True, "filename": filename, "duration": round(info["duration"], 2),
+                               "directed": info["directed"], "chars": info["chars"],
+                               "ready_ms": round((time.perf_counter() - began) * 1000, 1)})
+    finally:
+        feeder.cancel()
+        for t in all_tasks:
+            if not t.done():
+                t.cancel()
+
+    good = [p for p in parts if p["ok"]]
+    finished = time.perf_counter()
+    if parts:
+        add_span(PIPELINE_SPAN, min(p["started"] for p in parts), finished, category="io", parent=None, depth=0,
+                 pieces=len(parts), failed=len(parts) - len(good), voice=voice)
+    if not good:
+        yield ("done", {"success": False, "segments": len(parts),
+                        "message": next((p["error"] for p in parts if p["error"]), "Text is empty after processing.")})
+        return
+
+    filename = f"{base}.mp3"
+    await asyncio.to_thread((AUDIO_OUTPUT_DIR / filename).write_bytes, b"".join(p["bytes"] for p in good))
+    direction = {k: sum(int(p["direction"].get(k, 0)) for p in good)
+                 for k in ("notes", "notes_dropped", "tags_kept", "tags_dropped", "clamped", "repaired")}
+    direction["fallback"] = any(p["direction"].get("fallback") for p in good)
+    since_request = elapsed_ms()
+    yield ("done", {
+        "success": True,
+        "file_path": str((AUDIO_OUTPUT_DIR / filename).resolve()),
+        "filename": filename,
+        "duration": round(sum(p["duration"] for p in good), 2),
+        "voice": voice,
+        "style": valid_style,
+        "directed": any(p["directed"] for p in good),
+        "direction": direction,
+        "char_count": sum(p["chars"] for p in parts),
+        "segments": len(parts),
+        "failed_segments": len(parts) - len(good),
+        # milliseconds since the request began (so it includes the model's writing time)
+        "first_audio_ms": round(since_request - (finished - first_audio_at) * 1000, 1)
+        if since_request is not None and first_audio_at else None,
+        "message": "Audio synthesized successfully.",
+    })
+
+
+async def speak_script(tts_script: str, voice=DEFAULT_VOICE, target_style=None, annotate=True, use_style=True,
+                       content: Optional[str] = None) -> dict:
+    """Render a whole script through the same pipeline and return the summary (the concatenated file)."""
+    pieces = split_script(tts_script)
+
+    async def source():
+        for piece in pieces:
+            yield piece
+
+    result: dict = {}
+    async for kind, info in synthesize_pieces(source(), voice=voice, target_style=target_style,
+                                              annotate=annotate, use_style=use_style, content=content or tts_script):
+        if kind == "done":
+            result = info
     return result
+
+
+def cleanup_audio_output(max_age_hours: float = AUDIO_RETENTION_HOURS) -> int:
+    """
+    Delete generated MP3s older than `max_age_hours` — nobody replays a
+    yesterday's take. Returns the number of files removed. Never raises.
+    """
+    removed = 0
+    now = time.time()
+    try:
+        for path in AUDIO_OUTPUT_DIR.glob("*.mp3"):
+            if now - path.stat().st_mtime > max_age_hours * 3600:
+                path.unlink(missing_ok=True)
+                removed += 1
+    except Exception as err:
+        logger.warning("Audio cleanup skipped: %s", err)
+    if removed:
+        logger.info("Audio cleanup removed %d stale file(s).", removed)
+    return removed

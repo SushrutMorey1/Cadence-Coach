@@ -5,17 +5,36 @@
 # 1. Push this repo to GitHub
 # 2. Go to https://dashboard.render.com/blueprints
 # 3. Connect the repo → Render auto-detects this file
-# 4. Fill in the environment variables in the Render dashboard
+# 4. Fill in the secret environment variables in the Render dashboard
+#
+# Database: MySQL, hosted outside Render (Render's managed databases are PostgreSQL).
+# Put the host, port, user, password and database name of your MySQL server in the
+# MYSQL_* variables. The app will not start without it, so data is never written to a
+# throwaway file inside the container.
 
 services:
   - type: web
     name: cadence-coach
     runtime: docker
-    plan: free
+    plan: free               # sleeps after ~15 min idle; the first request then takes 30-60 s
     healthCheckPath: /api/health
     envVars:
+      - key: DB_BACKEND
+        value: mysql
+      - key: MYSQL_HOST
+        sync: false
+      - key: MYSQL_PORT
+        sync: false
+      - key: MYSQL_USER
+        sync: false
+      - key: MYSQL_PASSWORD
+        sync: false
+      - key: MYSQL_DATABASE
+        sync: false
       - key: GROQ_API_KEY
-        sync: false  # User must set manually in Render dashboard
+        sync: false
+      - key: LLM_MODEL
+        value: qwen/qwen3.8-27b
       - key: AZURE_SPEECH_KEY
         sync: false
       - key: AZURE_SPEECH_REGION
@@ -25,32 +44,6 @@ services:
       - key: GOOGLE_CLIENT_SECRET
         sync: false
       - key: SESSION_SECRET_KEY
-        generateValue: true  # Render auto-generates a random secret
+        generateValue: true
       - key: OAUTH_REDIRECT_URI
         value: https://cadence-coach.onrender.com/api/auth/callback
-      - key: MYSQL_HOST
-        fromDatabase:
-          name: cadence-coach-db
-          property: host
-      - key: MYSQL_PORT
-        fromDatabase:
-          name: cadence-coach-db
-          property: port
-      - key: MYSQL_USER
-        fromDatabase:
-          name: cadence-coach-db
-          property: user
-      - key: MYSQL_PASSWORD
-        fromDatabase:
-          name: cadence-coach-db
-          property: password
-      - key: MYSQL_DATABASE
-        fromDatabase:
-          name: cadence-coach-db
-          property: database
-
-databases:
-  - name: cadence-coach-db
-    plan: free
-    databaseName: cadence_coach
-    user: cadence_user

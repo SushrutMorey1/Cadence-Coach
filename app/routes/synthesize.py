@@ -1,108 +1,82 @@
+"""
+synthesize route — /api/synthesize, /api/warm
+================================================
+Speak arbitrary text (the Director's edit-and-re-speak and the flat-read
+comparison) through the same parallel pipeline the stream uses, and pre-open
+the Azure connection so the first performance does not pay for the handshake.
+"""
+
+import asyncio
 import os
-import json
 import time
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 
-from app.models.schemas import SynthesizeRequest, RewriteAndSpeakRequest
-from app.services.tts import async_synthesize_to_file, resolve_voice
-from app.services.llm import invoke_rewrite
-from app.services.profiler import init_traces, get_traces, trace
+from app.config import AZURE_SPEECH_KEY, TTS_POOL_SIZE
+from app.models.schemas import SynthesizeRequest
+from app.services.metrics import log_tts_call
+from app.services.profiler import init_traces
 from app.services.rate_limiter import get_user_key
-from app.utils.parsing import parse_llm_json
+from app.services.tts import _synth_pool, resolve_voice, speak_script
 
 router = APIRouter()
 
 
 @router.post("/synthesize")
-async def synthesize_speech(request: SynthesizeRequest):
-    """Synthesize text into audio via Azure TTS. Returns the MP3 file."""
+async def synthesize_speech(request: SynthesizeRequest, raw_request: Request):
+    """
+    Synthesize text into audio via Azure TTS. Returns the MP3 file.
+
+    `tts_script` may carry VOXIS voice direction (prosody, breaks, emphasis,
+    bracketed notes); `plain=true` ignores all of it for a flat A/B read.
+    """
+    init_traces()
+    voice = resolve_voice(request.voice)
     try:
-        init_traces()
-        voice = resolve_voice(request.voice)
-        result = await async_synthesize_to_file(
-            tts_script=request.tts_script,
+        result = await speak_script(
+            request.tts_script,
             voice=voice,
-            target_style=request.target_style,
+            target_style=None if request.plain else request.target_style,
+            annotate=not request.plain,
+            use_style=not request.plain,
         )
-
-        if not result["success"]:
-            raise HTTPException(status_code=502, detail=result["message"])
-
-        return FileResponse(
-            path=result["file_path"],
-            media_type="audio/mpeg",
-            filename=os.path.basename(result["file_path"]),
-            headers={"X-Audio-Duration": str(result.get("duration", "unknown"))},
-        )
-
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"TTS synthesis failed: {e}")
 
+    await log_tts_call(voice=voice, char_count=result.get("char_count", 0), duration_sec=result.get("duration"),
+                       status="success" if result.get("success") else f"failed: {result.get('message', 'unknown')}",
+                       user_key=get_user_key(raw_request))
+    if not result.get("success"):
+        raise HTTPException(status_code=502, detail=result.get("message", "Speech synthesis failed."))
 
-@router.post("/rewrite-and-speak")
-async def rewrite_and_speak(request: RewriteAndSpeakRequest, raw_request: Request):
-    """End-to-end: rewrite text then synthesize audio. Deep profiled."""
-    try:
-        init_traces()
-        user_key = get_user_key(raw_request)
+    return FileResponse(
+        path=result["file_path"],
+        media_type="audio/mpeg",
+        filename=os.path.basename(result["file_path"]),
+        headers={
+            "X-Audio-Duration": str(result.get("duration", "unknown")),
+            "X-Audio-Filename": os.path.basename(result["file_path"]),
+            "X-Audio-Directed": "1" if result.get("directed") else "0",
+        },
+    )
 
-        with trace("Request Validation", category="compute",
-                    text_chars=len(request.user_text),
-                    style=request.target_style):
-            pass
 
-        # Step 1: Rewrite via LLM
-        result = await invoke_rewrite(
-            user_text=request.user_text,
-            target_style=request.target_style,
-            user_key=user_key,
-        )
+# Each warm-up plays a short sound on every pooled synthesizer, which Azure bills.
+# One warm-up per window serves every user, however often the endpoint is called.
+WARM_COOLDOWN_SECONDS = 30
+_warm_lock = asyncio.Lock()
+_last_warm = 0.0
 
-        with trace("Parse LLM JSON Output", category="compute") as span:
-            parsed = parse_llm_json(result["raw_output"])
-            span["meta"]["json_keys"] = list(parsed.keys())
-            span["meta"]["raw_output_chars"] = len(result["raw_output"])
 
-        if parsed.get("error"):
-            raise HTTPException(status_code=422, detail=parsed)
-
-        display_script = parsed["display_script"]
-        tts_script = parsed["tts_script"]
-
-        # Step 2: Resolve voice
-        with trace("Voice Resolution", category="compute",
-                    voice_input=request.voice or "(default)") as span:
-            voice = resolve_voice(request.voice)
-            span["meta"]["resolved_voice"] = voice
-
-        # Step 3: Synthesize
-        tts_result = await async_synthesize_to_file(
-            tts_script=display_script,
-            voice=voice,
-            target_style=request.target_style,
-        )
-
-        return {
-            "display_script": display_script,
-            "tts_script": tts_script,
-            "audio": {
-                "success": tts_result["success"],
-                "file_path": tts_result.get("file_path"),
-                "filename": tts_result.get("filename"),
-                "duration": tts_result.get("duration"),
-                "voice": voice,
-                "message": tts_result["message"],
-            },
-            "detailed_latencies": get_traces(),
-        }
-
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=502, detail="LLM returned non-JSON output. Please retry.")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@router.post("/warm")
+async def warm_voice():
+    """Open the Azure connections ahead of use (the page calls this when the user starts typing)."""
+    global _last_warm
+    if not AZURE_SPEECH_KEY:
+        return {"warmed": 0}
+    async with _warm_lock:
+        if time.monotonic() - _last_warm < WARM_COOLDOWN_SECONDS:
+            return {"warmed": 0, "skipped": "recently warmed"}
+        _last_warm = time.monotonic()
+    return {"warmed": await asyncio.to_thread(_synth_pool.warm, TTS_POOL_SIZE)}

@@ -2,14 +2,19 @@
 transcribe route — /api/transcribe
 ======================================
 Accepts audio file uploads, runs Whisper transcription via Groq,
-and returns text + speaking analytics (WPM, filler words).
-Deep profiled at every step.
+and returns text + speaking analytics (WPM, filler words with positions,
+pauses, fastest stretch). Deep profiled at every step; the cycle is
+logged server-side for the Latency Lab.
 """
 
-from fastapi import APIRouter, UploadFile, File, HTTPException
+import time
+
+from fastapi import APIRouter, UploadFile, File, HTTPException, Request
 
 from app.services.stt import async_transcribe_audio
+from app.services.metrics import log_cycle
 from app.services.profiler import init_traces, get_traces, trace, sizeof_fmt
+from app.services.rate_limiter import get_user_key
 
 router = APIRouter()
 
@@ -25,6 +30,7 @@ MAX_SIZE_MB = 25
 
 @router.post("/transcribe")
 async def transcribe_audio_endpoint(
+    request: Request,
     file: UploadFile = File(..., description="Audio file to transcribe (.mp3, .wav, .m4a, .ogg, .webm, .flac)"),
 ):
     """
@@ -32,6 +38,7 @@ async def transcribe_audio_endpoint(
     Every sub-step is individually profiled.
     """
     init_traces()
+    started = time.perf_counter()
 
     # Step 1: Validate content type
     with trace("Validate Content Type", category="compute") as span:
@@ -73,4 +80,6 @@ async def transcribe_audio_endpoint(
         raise HTTPException(status_code=502, detail=result["message"])
 
     result["detailed_latencies"] = get_traces()
+    await log_cycle("Transcribe", (time.perf_counter() - started) * 1000, result["detailed_latencies"],
+                    user_key=get_user_key(request))
     return result

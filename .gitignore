@@ -16,10 +16,14 @@ env/
 # ── Environment / secrets ──
 .env
 .env.*
+!.env.example
 
-# ── Database ──
+# ── Database (SQLite fallback lives in data/) ──
 *.db
+*.db-wal
+*.db-shm
 metrics.db
+data/
 
 # ── Audio output (generated at runtime) ──
 audio_output/
@@ -42,5 +46,6 @@ Thumbs.db
 .coverage
 htmlcov/
 
-# ── Docker ──
-.dockerignore
+
+# ── Quality eval output ──
+evals/out/

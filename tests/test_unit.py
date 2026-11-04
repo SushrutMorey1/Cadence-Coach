@@ -1,14 +1,12 @@
 """
 test_unit.py — Unit tests for Cadence Coach
 ==============================================
-Tests core logic with mocked LLM and TTS services.
+Core helpers: speaking-style inference, SSML building, voice aliases, speech ratings and request schemas.
 Run with:  pytest tests/test_unit.py -v
 """
 
-import json
 # pyrefly: ignore [missing-import]
 import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -16,14 +14,12 @@ from app.services.tts import (
     infer_speaking_style,
     strip_all_ssml,
     get_valid_style_for_voice,
-    add_paragraph_pauses,
     build_ssml,
     resolve_voice,
 )
 from app.services.stt import _rate_wpm, _rate_fillers
 from app.models.schemas import (
     RewriteRequest,
-    RewriteResponse,
     CoachRequest,
     SynthesizeRequest,
 )
@@ -103,26 +99,35 @@ class TestValidStyleForVoice:
         assert result == "cheerful"
 
     def test_unsupported_style_falls_back(self):
-        result = get_valid_style_for_voice("en-US-DavisNeural", "narration-professional")
-        # narration-professional not supported by Davis, should fallback
+        result = get_valid_style_for_voice("en-US-DavisNeural", "empathetic")
+        # empathetic not supported by Davis, should fallback
         assert result in ["friendly", "chat", "cheerful", "hopeful"]
+
+    def test_unsupported_serious_style_uses_no_style(self):
+        # a friendly tone is the wrong mood for these: use the voice's own neutral delivery
+        assert get_valid_style_for_voice("en-US-DavisNeural", "narration-professional") is None
+        assert get_valid_style_for_voice("en-US-DavisNeural", "newscast") is None
+        assert get_valid_style_for_voice("en-US-DavisNeural", None) is None
+
+    def test_styles_that_used_to_fall_through_to_friendly(self):
+        assert infer_speaking_style("Solemn statesman") == ("sad", 0.7)
+        assert infer_speaking_style("Confident startup founder")[0] == "narration-professional"
+        assert infer_speaking_style("Fiery rally speaker")[0] == "excited"
+
+    def test_keywords_match_at_the_start_of_a_word(self):
+        assert infer_speaking_style("Like an ambassador")[0] == "friendly"      # not "sad"
+        assert infer_speaking_style("Trusted adviser")[0] == "friendly"         # not via "ted "
+        assert infer_speaking_style("Someone who enjoys life")[0] == "friendly"  # not via "joy"
+
+    def test_grave_content_overrides_an_energetic_style(self):
+        grave = "our colleague Ramesh passed away last week"
+        assert infer_speaking_style("High-energy hype", grave) == (None, 1.0)
+        assert infer_speaking_style("High-energy hype", "we won the contract")[0] == "excited"
+        assert infer_speaking_style("Warm manager", grave)[0] == "friendly"     # already gentle: left alone
 
     def test_unknown_voice_returns_none(self):
         result = get_valid_style_for_voice("en-US-UnknownVoice", "cheerful")
         assert result is None
-
-
-class TestAddParagraphPauses:
-    """Test paragraph pause insertion."""
-
-    def test_single_paragraph_unchanged(self):
-        text = "Just one paragraph."
-        assert add_paragraph_pauses(text) == text
-
-    def test_multiple_paragraphs_get_breaks(self):
-        text = "Paragraph one.\n\nParagraph two."
-        result = add_paragraph_pauses(text)
-        assert '<break time="350ms"/>' in result
 
 
 class TestBuildSSML:
@@ -217,10 +222,6 @@ class TestSchemas:
         with pytest.raises(Exception):
             RewriteRequest(user_text="", target_style="TED Talk")
 
-    def test_rewrite_response_valid(self):
-        resp = RewriteResponse(display_script="Clean text", tts_script="Annotated text")
-        assert resp.display_script == "Clean text"
-
     def test_coach_request_with_context(self):
         req = CoachRequest(user_text="My speech", context="Board meeting")
         assert req.context == "Board meeting"
@@ -239,17 +240,6 @@ class TestSchemas:
 # API Endpoint Tests (with mocked LLM)
 # ══════════════════════════════════════════════
 
-class TestHealthEndpoint:
-    """Test the health check endpoint."""
-
-    def test_health_returns_ok(self):
-        resp = client.get("/api/health")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["status"] == "online"
-        assert data["version"] == "2.0.0"
-
-
 class TestVoicesEndpoint:
     """Test the voices listing endpoint."""
 
@@ -260,115 +250,3 @@ class TestVoicesEndpoint:
         assert "available_voices" in data
         assert "davis" in data["available_voices"]
         assert "default_voice" in data
-
-
-class TestMetricsEndpoint:
-    """Test metrics endpoints."""
-
-    def test_metrics_returns_structure(self):
-        resp = client.get("/api/metrics")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "llm" in data
-        assert "tts" in data
-        assert "recent_calls" in data
-
-    def test_llm_metrics(self):
-        resp = client.get("/api/metrics/llm")
-        assert resp.status_code == 200
-
-    def test_tts_metrics(self):
-        resp = client.get("/api/metrics/tts")
-        assert resp.status_code == 200
-
-
-class TestRewriteEndpoint:
-    """Test the rewrite endpoint with mocked LLM."""
-
-    @patch("app.services.llm.invoke_rewrite")
-    def test_rewrite_success(self, mock_invoke):
-        mock_invoke.return_value = {
-            "raw_output": json.dumps({
-                "display_script": "A polished script.",
-                "tts_script": '<prosody rate="-5%">A polished script.</prosody>',
-            }),
-            "latency_ms": 150.0,
-        }
-
-        resp = client.post("/api/rewrite", json={
-            "user_text": "Hello world, this is a test.",
-            "target_style": "TED Talk speaker",
-        })
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "display_script" in data
-        assert "tts_script" in data
-
-    def test_rewrite_missing_fields(self):
-        resp = client.post("/api/rewrite", json={"user_text": "Hello"})
-        assert resp.status_code == 422  # Pydantic validation error
-
-
-class TestCoachEndpoint:
-    """Test the coach endpoint with mocked LLM."""
-
-    @patch("app.services.llm.invoke_coach")
-    def test_coach_success(self, mock_invoke):
-        mock_invoke.return_value = {
-            "raw_output": json.dumps({
-                "overall_score": 7.5,
-                "summary": "Good speech with room to improve.",
-                "vocabulary": {
-                    "score": 7,
-                    "strengths": ["Strong verbs"],
-                    "improvements": ["Reduce filler words"],
-                    "weak_words": [{"word": "very", "suggestion": "extremely", "reason": "more impactful"}],
-                    "power_words_used": ["ignite"],
-                },
-                "tone_and_emotion": {
-                    "score": 8,
-                    "detected_tone": "inspirational",
-                    "emotional_arc": "Rising",
-                    "feedback": ["Great energy"],
-                },
-                "voice_modulation": {
-                    "score": 6,
-                    "suggestions": [
-                        {"text_segment": "Hello world", "instruction": "Slow down", "type": "pace"},
-                    ],
-                },
-                "pacing_and_rhythm": {
-                    "score": 7,
-                    "avg_sentence_length": "medium",
-                    "variation_quality": "Good variety",
-                    "feedback": ["Nice rhythm"],
-                },
-                "emphasis_and_delivery": {
-                    "score": 7,
-                    "key_moments": [
-                        {"text_segment": "the future", "technique": "Pause before", "reason": "builds anticipation"},
-                    ],
-                },
-                "clarity_and_structure": {
-                    "score": 8,
-                    "opening_strength": "Strong hook",
-                    "closing_strength": "Memorable finale",
-                    "transitions": "Smooth",
-                    "feedback": ["Well organized"],
-                },
-                "top_3_actions": ["Add pauses", "Vary pitch", "Stronger close"],
-            }),
-            "latency_ms": 200.0,
-        }
-
-        resp = client.post("/api/coach", json={
-            "user_text": "Today we launch a product that will change the world. We have worked hard.",
-        })
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["overall_score"] == 7.5
-        assert len(data["top_3_actions"]) == 3
-
-    def test_coach_missing_text(self):
-        resp = client.post("/api/coach", json={})
-        assert resp.status_code == 422

@@ -1,5 +1,5 @@
 from typing import Optional, List
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 # Rewrite models
@@ -10,8 +10,11 @@ class RewriteRequest(BaseModel):
         ...,
         min_length=1,
         max_length=50_000,
-        description="The raw baseline text to be rewritten.",
-        examples=["Today we launch a product that will change the industry."],
+        description="Raw text to rewrite OR a command/instruction to generate content from scratch.",
+        examples=[
+            "Today we launch a product that will change the industry.",
+            "Write a speech for Gandhi Jayanti at school",
+        ],
     )
     target_style: str = Field(
         ...,
@@ -20,21 +23,6 @@ class RewriteRequest(BaseModel):
         description="The speaking persona, tone, or stylistic archetype.",
         examples=["Inspirational TED Talk speaker"],
     )
-
-
-class LatencyTrace(BaseModel):
-    name: str
-    latency_ms: float
-    category: Optional[str] = "general"
-    depth: Optional[int] = 0
-    parent: Optional[str] = None
-    meta: Optional[dict] = {}
-
-class RewriteResponse(BaseModel):
-    """Successful rewrite — two scripts."""
-    display_script: str
-    tts_script: str
-    detailed_latencies: Optional[List[LatencyTrace]] = None
 
 
 # Synthesize models
@@ -61,15 +49,10 @@ class SynthesizeRequest(BaseModel):
             "Used to select the Azure speaking persona."
         ),
     )
-
-
-class SynthesizeResponse(BaseModel):
-    """TTS synthesis result metadata."""
-    success: bool
-    file_path: Optional[str] = None
-    duration: Optional[float] = None
-    message: str
-    detailed_latencies: Optional[List[LatencyTrace]] = None
+    plain: bool = Field(
+        default=False,
+        description="Flat read: ignore all voice direction and speaking style (for A/B comparison).",
+    )
 
 
 # Rewrite + Speak (end-to-end)
@@ -80,8 +63,11 @@ class RewriteAndSpeakRequest(BaseModel):
         ...,
         min_length=1,
         max_length=50_000,
-        description="The raw baseline text to be rewritten.",
-        examples=["Today we launch a product that will change the industry."],
+        description="Raw text to rewrite OR a command/instruction to generate content from scratch.",
+        examples=[
+            "Today we launch a product that will change the industry.",
+            "Write a speech for Gandhi Jayanti at school",
+        ],
     )
     target_style: str = Field(
         ...,
@@ -95,15 +81,6 @@ class RewriteAndSpeakRequest(BaseModel):
         max_length=100,
         description="Azure neural voice name or alias.",
     )
-
-
-# Error
-
-class ErrorResponse(BaseModel):
-    """LLM-detected input error."""
-    error: bool
-    error_code: str
-    message: str
 
 
 # Communication Coach models
@@ -126,6 +103,19 @@ class CoachRequest(BaseModel):
         ),
         examples=["Audience: investors. Occasion: Series A pitch. Level: intermediate."],
     )
+    speech_metrics: Optional[dict] = Field(
+        default=None,
+        description=(
+            "Measured delivery data from /api/transcribe "
+            "(wpm, duration_sec, word_count, filler_count, filler_rate_pct, filler_words, "
+            "long_pauses, longest_pause_sec, fastest_stretch). "
+            "When present the coach cites the numbers."
+        ),
+    )
+    source: Optional[str] = Field(
+        default=None, max_length=16,
+        description="Where the text came from: 'text' or 'audio'. Stored with the result.",
+    )
 
 
 class WeakWord(BaseModel):
@@ -137,7 +127,7 @@ class WeakWord(BaseModel):
 
 class VocabularyAnalysis(BaseModel):
     """Vocabulary coaching feedback."""
-    score: int
+    score: float
     strengths: List[str]
     improvements: List[str]
     weak_words: List[WeakWord]
@@ -146,7 +136,7 @@ class VocabularyAnalysis(BaseModel):
 
 class ToneAndEmotion(BaseModel):
     """Tone and emotional arc analysis."""
-    score: int
+    score: float
     detected_tone: str
     emotional_arc: str
     feedback: List[str]
@@ -155,19 +145,20 @@ class ToneAndEmotion(BaseModel):
 class ModulationSuggestion(BaseModel):
     """A single voice modulation coaching point."""
     text_segment: str
-    instruction: str
+    # Models sometimes swap the two look-alike field names; accept either rather than pay for a retry.
+    instruction: str = Field(validation_alias=AliasChoices("instruction", "technique"))
     type: str
 
 
 class VoiceModulation(BaseModel):
     """Voice modulation coaching feedback."""
-    score: int
+    score: float
     suggestions: List[ModulationSuggestion]
 
 
 class PacingAndRhythm(BaseModel):
     """Pacing and rhythm analysis."""
-    score: int
+    score: float
     avg_sentence_length: str
     variation_quality: str
     feedback: List[str]
@@ -176,19 +167,19 @@ class PacingAndRhythm(BaseModel):
 class KeyMoment(BaseModel):
     """A critical delivery moment in the text."""
     text_segment: str
-    technique: str
+    technique: str = Field(validation_alias=AliasChoices("technique", "instruction"))
     reason: str
 
 
 class EmphasisAndDelivery(BaseModel):
     """Emphasis and delivery coaching."""
-    score: int
+    score: float
     key_moments: List[KeyMoment]
 
 
 class ClarityAndStructure(BaseModel):
     """Clarity and structural analysis."""
-    score: int
+    score: float
     opening_strength: str
     closing_strength: str
     transitions: str
@@ -199,6 +190,7 @@ class CoachResponse(BaseModel):
     """Full coaching analysis result."""
     overall_score: float
     summary: str
+    delivery_notes: Optional[str] = ""
     vocabulary: VocabularyAnalysis
     tone_and_emotion: ToneAndEmotion
     voice_modulation: VoiceModulation
@@ -206,4 +198,3 @@ class CoachResponse(BaseModel):
     emphasis_and_delivery: EmphasisAndDelivery
     clarity_and_structure: ClarityAndStructure
     top_3_actions: List[str]
-    detailed_latencies: Optional[List[LatencyTrace]] = None

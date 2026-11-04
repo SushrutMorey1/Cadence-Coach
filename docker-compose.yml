@@ -1,5 +1,7 @@
 version: "3.9"
 
+# docker compose up   → MySQL + the app; the app starts only once MySQL is healthy.
+
 services:
   # ── MySQL Database ──
   mysql:
@@ -7,14 +9,14 @@ services:
     container_name: cadence_coach_db
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:-cadence}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-cadence_coach}
     ports:
       - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_PASSWORD}"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_PASSWORD:-cadence}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -31,14 +33,16 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      # Override MySQL host to use the service name inside Docker network
+      DB_BACKEND: mysql
       MYSQL_HOST: mysql
       MYSQL_PORT: 3306
-    ports:
-      - "8000:8000"
+      MYSQL_USER: root
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-cadence}
     depends_on:
       mysql:
         condition: service_healthy
+    ports:
+      - "8000:8000"
     volumes:
       - audio_output:/app/audio_output
     networks:
