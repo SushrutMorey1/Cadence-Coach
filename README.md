@@ -83,7 +83,7 @@ The voice was retuned at the same time, by measurement:
 ## Quickstart
 
 ```bash
-git clone -b mod-fixes https://github.com/SushrutMorey1/Cadence-Coach.git && cd Cadence-Coach
+git clone https://github.com/SushrutMorey1/Cadence-Coach.git && cd Cadence-Coach
 python -m venv .venv && .venv/Scripts/activate      # or: source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env                                  # add the Groq, Azure and Google keys and your MySQL details
