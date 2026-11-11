@@ -194,3 +194,46 @@ def test_the_report_has_a_latency_section_that_separates_refusals_from_first_tok
     text = summary([CASE, harmful], {"x": rescued, "h": refused})
     assert "## Latency" in text and "refusal: n=2, median 0.70s" in text and "first token): n=1, median 0.50s" in text
     assert "after a re-ask: n=1, median 1.20s" in text and "Per-minute waits for a 429 (not counted above): 1" in text
+
+
+# ── the judge mode ──
+
+JUDGE = Path(CASES).with_name("variants") / "judge_v1.txt"
+
+
+def test_the_judge_prompt_file_loads_and_fills_in_the_request():
+    from evals.run_safety_eval import build_judge_prompt
+    prompt, system = build_judge_prompt(JUDGE)
+    messages = prompt.format_messages(user_text="we won the contract", target_style="Confident")
+    assert "gatekeeper" in system and "WRITE_NOTE" in system and "=== " not in system
+    assert "we won the contract" in messages[1].content and "Confident" in messages[1].content and "{" not in messages[1].content
+
+
+def test_a_label_is_read_from_the_reply_even_with_a_preamble_or_a_think_block():
+    from evals.run_safety_eval import parse_label
+    assert parse_label("WRITE") == "WRITE" and parse_label("write_note") == "WRITE_NOTE" and parse_label(" REFUSE\n") == "REFUSE"
+    assert parse_label("<think>maybe REFUSE</think>\nWRITE") == "WRITE"
+    assert parse_label("Label: UNSURE") == "UNSURE" and parse_label("I cannot say") is None
+
+
+def test_the_judge_makes_one_short_call_and_reports_its_usage():
+    from evals.run_safety_eval import build_judge_prompt, classify_judge
+    prompt, _ = build_judge_prompt(JUDGE)
+    judge = FakeStreamLLM("WRITE_NOTE")
+    with patch("app.services.llm.get_llm", return_value=judge):
+        result = asyncio.run(classify_judge(CASE, prompt))
+    assert judge.calls == 1 and result["label"] == "WRITE_NOTE" and result["outcome"] == "script"
+    assert result["calls"][0]["usage"]["total_tokens"] > 0 and not hung_up(result["calls"][0])
+    with patch("app.services.llm.get_llm", return_value=FakeStreamLLM("hmm")):
+        assert asyncio.run(classify_judge(CASE, prompt))["outcome"] == "blocked"
+
+
+def test_judge_verdicts_treat_unsure_as_neither_a_wrong_refusal_nor_missed_harm_and_summary_counts_notes():
+    safe, harmful = {"expect": "script"}, {"expect": "error"}
+    unsure = {"outcome": "unsure"}
+    assert verdict(safe, unsure) == verdict(harmful, unsure) == "unsure"
+    edge = dict(CASE, id="e", expect="script", expect_note=True)
+    results = {"x": {"outcome": "script", "label": "WRITE", "head": "WRITE", "message": "", "seconds": 0.3, "calls": [{"usage": {"total_tokens": 450}}]},
+               "e": {"outcome": "script", "label": "WRITE", "head": "WRITE", "message": "", "seconds": 0.5, "calls": [{"usage": {"total_tokens": 460}}]}}
+    text = summary([CASE, edge], results, "Mode: judge (x)")
+    assert "labelled WRITE_NOTE 0 of 1; labelled plain WRITE 1" in text and "total 910" in text and "re-ask" not in text
