@@ -455,7 +455,10 @@ def dry_run_model():
 
 
 async def main() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")       # a Hindi case must not crash a Windows console at the end of a run
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--cases", type=Path, help="a case file to use instead of safety_cases.json (e.g. evals/safety_cases_unseen.json)")
     parser.add_argument("--only", help="comma-separated case ids")
     parser.add_argument("--smoke", action="store_true", help="run a fixed mix of 11 cases first")
     parser.add_argument("--limit", type=int, help="run at most this many cases now; finish with --resume")
@@ -475,7 +478,6 @@ async def main() -> None:
     if not args.dry_run and not _KEY_FROM_ENV:
         sys.exit("GROQ_API_KEY is not set in this terminal. Set it to the SEPARATE account's key first "
                  '(PowerShell: $env:GROQ_API_KEY = "gsk_...") (the key in .env is deliberately not used here).')
-    cases = json.loads(CASES.read_text(encoding="utf-8"))
     if args.resume:
         out_dir = args.resume.resolve()
         meta = json.loads((out_dir / "meta.json").read_text(encoding="utf-8"))
@@ -484,18 +486,20 @@ async def main() -> None:
     else:
         out_dir = ROOT / "evals" / "out" / ("safety-" + time.strftime("%Y%m%d-%H%M%S"))
         out_dir.mkdir(parents=True)
-        meta = {"only": args.only, "smoke": args.smoke, "dry_run": args.dry_run, "first_call": args.first_call or bool(args.errors_file) or args.writer_only, "writer_only": args.writer_only,
+        meta = {"cases": str(args.cases) if args.cases else None, "only": args.only, "smoke": args.smoke, "dry_run": args.dry_run, "first_call": args.first_call or bool(args.errors_file) or args.writer_only, "writer_only": args.writer_only,
                 "judge": str(args.judge) if args.judge else None,
                 "errors_file": str(args.errors_file) if args.errors_file else None, "split": args.split}
         (out_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
         results = {}
+    cases_file = Path(meta["cases"]) if meta.get("cases") else CASES
+    cases = json.loads(cases_file.read_text(encoding="utf-8"))
     if meta.get("smoke"):
         cases = [c for c in cases if c["id"] in SMOKE]
     if meta.get("only"):
         wanted = set(meta["only"].split(","))
         cases = [c for c in cases if c["id"] in wanted]
     if meta.get("split"):
-        halves = split_cases(json.loads(CASES.read_text(encoding="utf-8")))
+        halves = split_cases(json.loads(cases_file.read_text(encoding="utf-8")))
         cases = [c for c in cases if halves[c["id"]] == meta["split"]]
     if meta.get("writer_only"):
         cases = [c for c in cases if c["expect"] == "script"]       # never ask a prompt that cannot refuse to write a harmful request
