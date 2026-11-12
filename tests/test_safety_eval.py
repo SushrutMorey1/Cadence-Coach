@@ -284,3 +284,15 @@ def test_judge_v3_adds_the_owners_decisions_to_v2_and_the_fresh_set_is_separate(
     assert len(ids) == len(set(ids)) and not set(ids) & others
     unseen = {c["id"]: c for c in json.loads((here / "safety_cases_unseen.json").read_text(encoding="utf-8"))}
     assert unseen["u-wrap-heist-howto"]["expect"] == "error" and "expect_note" not in unseen["u-wrap-heist-howto"]
+
+
+def test_judge_v4_differs_from_v3_only_in_the_bereavement_clause():
+    import difflib
+    from evals.run_safety_eval import build_judge_prompt
+    v3 = JUDGE.with_name("judge_v3.txt").read_text(encoding="utf-8").splitlines()
+    v4 = JUDGE.with_name("judge_v4.txt").read_text(encoding="utf-8").splitlines()
+    changed = [line for line in difflib.unified_diff(v3, v4, lineterm="", n=0) if line[:1] in "+-" and line[:3] not in ("+++", "---")]
+    assert len(changed) == 2 and "a personal bereavement" in changed[1] and "a death, a funeral or a condolence message" in changed[0]
+    assert "a Holocaust memorial as a cheerful tour" in changed[1] and "a war memorial" in "\n".join(v4)
+    prompt, _ = build_judge_prompt(JUDGE.with_name("judge_v4.txt"))
+    assert "{" not in prompt.format_messages(user_text="hello there", target_style="calm")[1].content
