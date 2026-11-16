@@ -10,6 +10,7 @@ from typing import AsyncIterator, Optional
 import azure.cognitiveservices.speech as speechsdk
 
 from app.config import (
+    TTS_STAGE_NOTES_PER_PARAGRAPH,
     AZURE_SPEECH_KEY,
     AZURE_SPEECH_REGION,
     AUDIO_OUTPUT_DIR,
@@ -716,6 +717,30 @@ def _visible_len(text: str) -> int:
     return len(re.sub(r"<[^>]*>|\[[^\]]*\]", "", text).strip())
 
 
+def _cap_notes(text: str, budget: int) -> tuple:
+    """Keep at most `budget` bracketed notes in `text`, drop the rest. Returns (text, notes kept, notes dropped)."""
+    kept = dropped = 0
+
+    def keep_or_drop(m):
+        nonlocal kept, dropped
+        if kept < budget:
+            kept += 1
+            return m.group(0)
+        dropped += 1
+        return ""
+    text = _NOTE_RE.sub(keep_or_drop, text)
+    return (re.sub(r"[ \t]{2,}", " ", text).strip() if dropped else text), kept, dropped
+
+
+def cap_stage_notes(tts_script: str, per_paragraph=None) -> str:
+    """The whole-script version of the cap PieceCutter applies while streaming: at most `per_paragraph` notes in each
+    paragraph (None: TTS_STAGE_NOTES_PER_PARAGRAPH; that setting off: unchanged)."""
+    cap = TTS_STAGE_NOTES_PER_PARAGRAPH if per_paragraph is None else per_paragraph
+    if cap is None or not tts_script:
+        return tts_script or ""
+    return "\n\n".join(_cap_notes(p, cap)[0] for p in re.split(r"\n\s*\n", tts_script))
+
+
 class PieceCutter:
     """
     Cut an annotated script into speakable pieces, incrementally.
@@ -733,6 +758,8 @@ class PieceCutter:
         self._cur = ""                  # the piece being assembled
         self._made = 0                  # pieces handed out so far
         self._new_paragraph = False     # the next piece opens a paragraph
+        self._notes_left = TTS_STAGE_NOTES_PER_PARAGRAPH      # stage notes still allowed in this paragraph (None: no cap)
+        self.notes_capped = 0           # notes removed by the cap so far
 
     def feed(self, text: str) -> list:
         self._tail += text
@@ -754,6 +781,12 @@ class PieceCutter:
         return piece
 
     def _add(self, sentence: str, out: list) -> None:
+        if self._notes_left is not None:
+            sentence, kept, dropped = _cap_notes(sentence, self._notes_left)
+            self._notes_left -= kept
+            self.notes_capped += dropped
+            if not sentence:
+                return
         self._cur = f"{self._cur} {sentence}".strip() if self._cur else sentence
         if _visible_len(self._cur) >= self._target():
             out.append(self._take())
@@ -772,6 +805,7 @@ class PieceCutter:
             if piece:
                 out.append(piece)
             self._new_paragraph = True
+            self._notes_left = TTS_STAGE_NOTES_PER_PARAGRAPH      # a new paragraph gets its own allowance
         sentences, self._tail = _scan(self._tail)
         for sentence in sentences:
             self._add(sentence, out)

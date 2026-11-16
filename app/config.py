@@ -92,6 +92,14 @@ TTS_POOL_SIZE = int(os.getenv("TTS_POOL_SIZE", "3"))
 # Pause between sentences. Azure's own default is about 0.9 s, and the model's breaks stack on
 # top of it. Much shorter and the pace climbs past the 130-160 wpm the Coach recommends.
 # "off" hands pacing back to Azure and keeps every <break> the model wrote.
+# Bracketed stage notes ([voice drops], [let this land]) kept per paragraph before the voice sees them; the rest are
+# removed. The writer-only prompt added about a third more notes than the full prompt (docs/SAFETY_EVAL.md) and the
+# owner's blind listening test found no clear gain or loss from a cap of 1, so the default is a looser 2 (on the fair
+# A/B scripts it changed 1 of 32). It changes what the voice receives, never the tokens the model writes. "off" keeps
+# every note.
+_NOTES_CAP = os.getenv("TTS_STAGE_NOTES_PER_PARAGRAPH", "2").strip().lower()      # owner's choice, 16 Nov 2026
+TTS_STAGE_NOTES_PER_PARAGRAPH = None if _NOTES_CAP in ("off", "none", "") else int(_NOTES_CAP)
+
 _SENTENCE_GAP = os.getenv("TTS_SENTENCE_GAP_MS", "700").strip()
 TTS_SENTENCE_GAP_MS = int(_SENTENCE_GAP) if _SENTENCE_GAP.isdigit() else None
 

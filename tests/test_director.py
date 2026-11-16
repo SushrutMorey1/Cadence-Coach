@@ -714,3 +714,48 @@ class TestCleanupAudio:
             assert not old.exists() and fresh.exists()
         finally:
             remove_audio("test_cleanup_*.mp3")
+
+
+# ══════════════════════════════════════════════
+# The stage-note cap: at most one bracketed note per paragraph reaches the voice
+# ══════════════════════════════════════════════
+
+NOTEY = ("[voice drops] We started this team with three people. [building momentum] Today there are forty of us, "
+         "and every one of you carried part of the load. [let this land] Thank you.\n\n"
+         "[smile in voice] Next year we go further. [voice rises] Much further, together.")
+
+
+class TestStageNoteCap:
+    def test_the_first_note_in_each_paragraph_is_kept_and_the_rest_removed(self):
+        from app.services.tts import cap_stage_notes
+        capped = cap_stage_notes(NOTEY, per_paragraph=1)
+        first, second = capped.split("\n\n")
+        assert first.startswith("[voice drops] We started") and "[building momentum]" not in first and "[let this land]" not in first
+        assert second.startswith("[smile in voice] Next year") and "[voice rises]" not in second
+        assert strip_all_ssml(capped).split() == strip_all_ssml(NOTEY).split()          # no spoken word is lost
+
+    def test_streaming_applies_the_same_cap_as_the_whole_script(self):
+        from app.services.tts import cap_stage_notes
+        with patch.object(tts_service, "TTS_STAGE_NOTES_PER_PARAGRAPH", 1):
+            cutter, out = PieceCutter(), []
+            for ch in NOTEY:
+                out += cutter.feed(ch)
+            out += cutter.flush()
+            assert sum(p.count("[") for p in out) == 2 and cutter.notes_capped == 3
+            assert split_script(NOTEY) == out
+        assert " ".join(strip_all_ssml(p) for p in out).split() == strip_all_ssml(cap_stage_notes(NOTEY, 1)).split()
+
+    def test_the_cap_can_be_turned_off_or_set_to_zero(self):
+        from app.services.tts import cap_stage_notes
+        with patch.object(tts_service, "TTS_STAGE_NOTES_PER_PARAGRAPH", None):
+            assert sum(p.count("[") for p in split_script(NOTEY)) == 5 and cap_stage_notes(NOTEY) == NOTEY
+        assert "[" not in cap_stage_notes(NOTEY, per_paragraph=0)
+
+    def test_the_default_is_two_notes_per_paragraph(self):
+        from app import config
+        assert config.TTS_STAGE_NOTES_PER_PARAGRAPH == 2
+
+    def test_the_blind_eval_shows_the_evaluator_only_the_text_on_screen(self):
+        from evals.run_director_eval import _blind_side
+        side = _blind_side({"error": None, "display_script": strip_all_ssml(NOTEY), "tts_script": NOTEY})
+        assert set(side) == {"script"} and "[" not in side["script"] and "<" not in side["script"]
