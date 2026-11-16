@@ -27,6 +27,20 @@ Usage (from the project root, with real keys in .env):
   python -m evals.run_director_eval --revoice evals/out/<run>
                                                     # re-render a run's audio, no Groq tokens
 
+Series mode compares the two pipelines the app can run, both fresh in the same run:
+  python -m evals.run_director_eval --series     # old = today's full prompt (SAFETY_JUDGE off)
+                                                 # new = safety judge + writer-only prompt (on)
+It refuses to start without GROQ_API_KEY set for this command (the key in .env is never
+used in this mode, so the app's own account is not spent by accident).
+
+For an independent judge (the script-judge agent in .claude/agents):
+  python -m evals.run_director_eval --blind-export evals/out/<run>
+      writes <run>/blind/pairs.json: every pair twice, once in each order, under neutral ids, with only the
+      text the user sees on screen (voice quality is judged by the owner, by listening);
+      the key stays in <run>/blind_key.json, outside the folder the judge reads
+  python -m evals.run_director_eval --blind-score evals/out/<run> <verdicts.json>
+      maps the judge's verdicts back to the two prompts and prints the tally
+
 A resumed run keeps the settings it was started with. Reused audio is only a fair
 comparison while the voice code is unchanged since that run; if it has changed,
 re-render with --revoice so both sides are spoken the same way.
@@ -56,9 +70,13 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
+from typing import Optional
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 CASES = Path(__file__).with_name("director_cases.json")
+
+_KEY_FROM_ENV = os.environ.get("GROQ_API_KEY")      # read before app.config loads .env
 
 # The eval writes metrics as the app does; keep them out of the real database.
 os.environ.setdefault("DB_BACKEND", "sqlite")
@@ -124,18 +142,26 @@ async def _stream_new(case: dict) -> dict:
                 out["waits"] += 1
             elif kind == "token":
                 out.setdefault("first_token_s", round(time.perf_counter() - t0, 2))
+            elif kind == "note":
+                out["note"] = ev.get("text")
             elif kind == "done":
+                out["judge"] = ev.get("judge")
                 out["prompt_tokens"] = ev.get("prompt_tokens") or 0
                 out["tokens"] = out["prompt_tokens"] + (ev.get("completion_tokens") or 0)
     out["seconds"] = round(time.perf_counter() - t0, 2)
     return out
 
 
-async def run_new(case: dict) -> dict:
-    """The current prompt through the app's own streaming pipeline (no voice)."""
+async def run_new(case: dict, judge: Optional[bool] = None) -> dict:
+    """The current prompt through the app's own streaming pipeline (no voice). judge=True or False forces
+    SAFETY_JUDGE on or off for this call (series mode); None leaves the app's setting alone."""
     attempt = 0
     while True:
-        out = await _stream_new(case)
+        if judge is None:
+            out = await _stream_new(case)
+        else:
+            with patch("app.services.director.SAFETY_JUDGE", judge):
+                out = await _stream_new(case)
         error = out.get("error") or ""
         if _is_daily_limit(error):
             raise DailyLimitReached(error)
@@ -324,11 +350,14 @@ document.getElementById('copy').addEventListener('click', async () => {
 """
 
 
+_SERIES_MODE = False       # set by main(): in series mode every case is compared, new_only included
+
+
 def _sides_for(case: dict, sides: list) -> list:
-    return ["new"] if case.get("new_only") else sides
+    return ["new"] if case.get("new_only") and not _SERIES_MODE else sides
 
 
-def write_report(cases: list, results: dict, out_dir: Path, seed: int, run_sides: list) -> Path:
+def write_report(cases: list, results: dict, out_dir: Path, seed: int, run_sides: list, legend: str = "") -> Path:
     key, blocks, rule_blocks = [], [], []
     for case in cases:
         pair = results.get(case["id"]) or {}
@@ -377,7 +406,7 @@ audio{{width:100%;margin-top:8px}} .verdict{{display:flex;flex-wrap:wrap;gap:12p
 {"".join(rule_blocks)}
 <p><button id="copy" type="button">Copy verdicts</button></p>
 <textarea id="verdicts" hidden readonly></textarea>
-<details><summary>Answer key (open after judging)</summary><ul>{"".join(key)}</ul></details>
+<details><summary>Answer key (open after judging)</summary>{f"<p>{html.escape(legend)}</p>" if legend else ""}<ul>{"".join(key)}</ul></details>
 <script>{_REPORT_SCRIPT}</script>
 </body></html>"""
     path = out_dir / "report.html"
@@ -440,12 +469,80 @@ def summary_lines(cases: list, results: dict) -> list:
             f"prosody {100 * len(re.findall(r'<prosody[ >]', tts)) / words:.1f}, breaks {100 * tts.count('<break') / words:.1f}, "
             f"'not just X' {100 * tics / words:.2f} | {100 * directed / words:.0f}% of words under tags")
     new = [(c["id"], results[c["id"]]["new"]) for c in cases if "new" in results.get(c["id"], {})]
+    judged = [(i, r["judge"]) for i, r in new if r.get("judge")]
+    if judged:
+        lines.append("safety judge on the new side: " + ", ".join(f"{i} {j['label']}" for i, j in judged
+                                                                  if j["label"] != "WRITE") + f" (the other {sum(j['label'] == 'WRITE' for _, j in judged)} WRITE)")
     lines.append("first-try refusals on the current prompt: " + (", ".join(i for i, r in new if r.get("retries")) or "none"))
     clean = [r for _, r in new if r.get("first_token_s") and not r.get("waits") and not r.get("retries")]
     if clean:
         lines.append(f"first token avg {sum(r['first_token_s'] for r in clean) / len(clean):.2f} s over {len(clean)} calls; "
                      f"prompt tokens avg {sum(r.get('prompt_tokens') or 0 for r in clean) / len(clean):.0f}")
     return lines
+
+
+# ── Blind export for an independent judge ─────────────────────────
+
+def _blind_side(result: dict) -> dict:
+    if result.get("error"):
+        return {"script": None, "refused_with": str(result["error"])}
+    # Only what the user sees on screen: the owner judges the voice by listening (16 Nov 2026), so the evaluator never
+    # sees voice tags or stage notes.
+    return {"script": result.get("display_script") or strip_all_ssml(result.get("tts_script", ""))}
+
+
+def blind_export(out_dir: Path, cases: list, results: dict, seed: int) -> Path:
+    """Every complete pair twice, once in each order, shuffled, under neutral ids, in <run>/blind/pairs.json.
+    The key that maps an id back to the prompts is written to <run>/blind_key.json, outside the judge's folder."""
+    items = []
+    for case in cases:
+        pair = results.get(case["id"]) or {}
+        if not all(side in pair for side in ("new", "old")):
+            continue
+        for first, second in (("new", "old"), ("old", "new")):
+            items.append((case, first, second))
+    random.Random(f"{seed}:blind").shuffle(items)
+    pairs, key = [], {}
+    for n, (case, first, second) in enumerate(items, 1):
+        item_id = f"p{n:03d}"
+        pair = results[case["id"]]
+        pairs.append({"id": item_id, "draft": case["user_text"], "style": case["target_style"], "case_intent": case["why"],
+                      "A": _blind_side(pair[first]), "B": _blind_side(pair[second])})
+        key[item_id] = {"case": case["id"], "A": first, "B": second}
+    folder = out_dir / "blind"
+    folder.mkdir(exist_ok=True)
+    (folder / "pairs.json").write_text(json.dumps(pairs, indent=2, ensure_ascii=False), encoding="utf-8")
+    (out_dir / "blind_key.json").write_text(json.dumps(key, indent=2), encoding="utf-8")
+    return folder / "pairs.json"
+
+
+def blind_score(out_dir: Path, verdicts: list) -> list:
+    """Map verdicts [{"id", "winner": "A"|"B"|"same", "reason"}] back to the prompts. A case counts for a prompt
+    only when both orders agree; disagreement between the two orders is reported as position bias, not a win."""
+    key = json.loads((out_dir / "blind_key.json").read_text(encoding="utf-8"))
+    by_case: dict = {}
+    for v in verdicts:
+        entry = key[v["id"]]
+        winner = v["winner"].strip().upper()
+        side = "same" if winner == "SAME" else entry[winner]
+        by_case.setdefault(entry["case"], []).append((side, v.get("reason", "")))
+    tally = {"new": [], "old": [], "same": [], "split": [], "incomplete": []}
+    for case_id, votes in sorted(by_case.items()):
+        sides = {s for s, _ in votes}
+        if len(votes) < 2:
+            tally["incomplete"].append(case_id)
+        elif len(sides) == 1:
+            tally[sides.pop()].append(case_id)
+        else:
+            tally["split"].append(case_id)
+    (out_dir / "blind_scores.json").write_text(json.dumps({"by_case": by_case, "tally": tally}, indent=2, ensure_ascii=False),
+                                               encoding="utf-8")
+    return [f"{len(by_case)} cases judged in both orders",
+            f"new (judge + writer-only) better: {len(tally['new'])} {tally['new']}",
+            f"old (today's full prompt) better: {len(tally['old'])} {tally['old']}",
+            f"same: {len(tally['same'])}",
+            f"the two orders disagreed (position bias, no winner): {len(tally['split'])} {tally['split']}"] + \
+           ([f"only one order judged: {tally['incomplete']}"] if tally["incomplete"] else [])
 
 
 def _shown(path: Path) -> str:
@@ -466,7 +563,32 @@ async def main() -> None:
     parser.add_argument("--reuse-old", type=Path, help="an earlier run whose old side (scripts and audio) to reuse")
     parser.add_argument("--revoice", type=Path, help="a run folder whose audio to re-render with the current voice code")
     parser.add_argument("--seed", type=int, default=int(time.time()), help="side shuffle seed")
+    parser.add_argument("--series", action="store_true",
+                        help="old = today's full prompt, new = safety judge + writer-only prompt, both run fresh")
+    parser.add_argument("--aa", action="store_true",
+                        help="with --series: an A/A check, both sides today's full prompt (judge off); use with --reuse-old so old is "
+                             "an earlier sample and new a fresh one. Shows how much two samples of the SAME prompt differ")
+    parser.add_argument("--blind-export", type=Path, help="a finished run folder: write blind/pairs.json for an independent judge")
+    parser.add_argument("--blind-score", nargs=2, type=Path, metavar=("RUN", "VERDICTS"),
+                        help="a run folder and the judge's verdicts (JSON list): print the tally")
     args = parser.parse_args()
+    global _SERIES_MODE
+    resuming_series = bool(args.resume and json.loads((args.resume / "meta.json").read_text(encoding="utf-8")).get("series"))
+    if (args.series or args.aa or resuming_series) and not _KEY_FROM_ENV:
+        sys.exit("Series mode needs GROQ_API_KEY set for this command (the second account's key); the key in .env is "
+                 "deliberately not used.")
+
+    if args.blind_export or args.blind_score:
+        out_dir = (args.blind_export or args.blind_score[0]).resolve()
+        meta = json.loads((out_dir / "meta.json").read_text(encoding="utf-8"))
+        _SERIES_MODE = bool(meta.get("series"))
+        if args.blind_export:
+            results = json.loads((out_dir / "results.json").read_text(encoding="utf-8"))
+            print("Blind pairs:", _shown(blind_export(out_dir, json.loads(CASES.read_text(encoding="utf-8")), results, meta["seed"])))
+        else:
+            for line in blind_score(out_dir, json.loads(args.blind_score[1].read_text(encoding="utf-8"))):
+                print(line)
+        return
 
     if args.revoice:
         out_dir = args.revoice.resolve()
@@ -475,7 +597,8 @@ async def main() -> None:
         cases = json.loads(CASES.read_text(encoding="utf-8"))
         init_db()
         await revoice_run(out_dir, cases, results)
-        run_sides = ["new"] + (["old"] if meta.get("old_ref") else [])
+        _SERIES_MODE = bool(meta.get("series"))
+        run_sides = ["new"] + (["old"] if meta.get("old_ref") or meta.get("series") else [])
         print("Report:", write_report(cases, results, out_dir, meta["seed"], run_sides), flush=True)
         return
 
@@ -487,22 +610,27 @@ async def main() -> None:
     else:
         out_dir = ROOT / "evals" / "out" / time.strftime("%Y%m%d-%H%M%S")
         out_dir.mkdir(parents=True)
-        meta = {"seed": args.seed, "old_ref": None if args.no_old else args.old_ref,
-                "audio": args.audio, "only": args.only}
+        meta = {"seed": args.seed, "old_ref": None if (args.no_old or args.series or args.aa) else args.old_ref,
+                "audio": args.audio, "only": args.only, "series": args.series or args.aa, "aa": args.aa}
         (out_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
         results = reuse_old_side(args.reuse_old.resolve(), out_dir) if args.reuse_old else {}
         save(out_dir, results)
 
+    _SERIES_MODE = bool(meta.get("series"))
+    legend = ("A/A check: old and new are BOTH today's full prompt (SAFETY_JUDGE off); old is an earlier sample, new a fresh one"
+              if meta.get("aa") else
+              "old = today's full prompt (SAFETY_JUDGE off); new = safety judge + writer-only prompt (SAFETY_JUDGE on)"
+              if _SERIES_MODE else "")
     cases = json.loads(CASES.read_text(encoding="utf-8"))
     if meta.get("only"):
         wanted = set(meta["only"].split(","))
         cases = [c for c in cases if c["id"] in wanted]
-    sides = ["new"] + (["old"] if meta.get("old_ref") else [])
+    sides = ["new"] + (["old"] if meta.get("old_ref") or _SERIES_MODE else [])
     todo = [c for c in cases if any(s not in results.get(c["id"], {}) for s in _sides_for(c, sides))]
     if args.limit:
         todo = todo[:args.limit]
     init_db()
-    needs_old = any(s == "old" and s not in results.get(c["id"], {}) for c in todo for s in _sides_for(c, sides))
+    needs_old = not _SERIES_MODE and any(s == "old" and s not in results.get(c["id"], {}) for c in todo for s in _sides_for(c, sides))
     old_prompt = load_old_prompt(meta["old_ref"]) if needs_old else None
     print(f"{len(todo)} case(s) to run, results in {_shown(out_dir)}", flush=True)
 
@@ -516,24 +644,27 @@ async def main() -> None:
                 if not first_call:
                     await asyncio.sleep(GAP_SECONDS)
                 first_call = False
-                pair[side] = await (run_new(case) if side == "new" else run_old(case, old_prompt))
+                if _SERIES_MODE:
+                    pair[side] = await run_new(case, judge=(side == "new" and not meta.get("aa")))
+                else:
+                    pair[side] = await (run_new(case) if side == "new" else run_old(case, old_prompt))
                 tokens += pair[side].get("tokens") or 0
                 save(out_dir, results)
             if meta.get("audio"):
                 for result in pair.values():
                     await voice(result, case, out_dir)
                 save(out_dir, results)
-            write_report(cases, results, out_dir, meta["seed"], sides)
+            write_report(cases, results, out_dir, meta["seed"], sides, legend)
             summary = ", ".join(f"{s}: {'ERROR' if r.get('error') else 'ok'} {r.get('seconds')}s" for s, r in pair.items())
             print(f"[{n}/{len(todo)}] {case['id']} - {summary} - {tokens:,} Groq tokens so far", flush=True)
     except DailyLimitReached as stop:
-        write_report(cases, results, out_dir, meta["seed"], sides)
+        write_report(cases, results, out_dir, meta["seed"], sides, legend)
         print(f"Stopped: {stop}", flush=True)
         print(f"Finish later with: python -m evals.run_director_eval --resume {_shown(out_dir)}", flush=True)
         print("Report so far:", out_dir / "report.html", flush=True)
         sys.exit(2)
 
-    report = write_report(cases, results, out_dir, meta["seed"], sides)
+    report = write_report(cases, results, out_dir, meta["seed"], sides, legend)
     left = sum(any(s not in results.get(c["id"], {}) for s in _sides_for(c, sides)) for c in cases)
     if left:
         print(f"{left} case(s) still to run: python -m evals.run_director_eval --resume {_shown(out_dir)}", flush=True)
