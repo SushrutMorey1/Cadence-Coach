@@ -13,7 +13,13 @@ arrive they go three places at once:
 so the first sentence is being spoken while the rest is still being written.
 The stream is one SSE response; the two sides talk to it through a queue.
 
-Events:  token · rate_limited · retry · script_done · audio_segment · audio_done · done · error
+Events:  note · token · rate_limited · retry · script_done · audio_segment · audio_done · done · error
+
+With SAFETY_JUDGE on, a short judge call (services/judge.py) decides: a refusal label, UNSURE twice or a judge
+that is too slow twice ends the stream with `error` and nothing is shown or spoken; WRITE_NOTE adds a `note`
+event; otherwise the writer prompt (prompts/voxis.py) writes the script. With JUDGE_PARALLEL (the default) the
+writer starts at the same moment as the judge and its output is held back until the verdict, so a request that
+is written waits for the slower of the two, not for both; a refused one has its writer cancelled.
 """
 
 import asyncio
@@ -24,9 +30,10 @@ from typing import AsyncGenerator, Optional
 
 from langchain_core.messages import HumanMessage
 
-from app.config import LLM_MODEL
-from app.prompts.voxis import voxis_prompt
+from app.config import JUDGE_PARALLEL, LLM_MODEL, SAFETY_JUDGE
+from app.prompts.voxis import voxis_prompt, writer_prompt
 from app.services import llm
+from app.services.judge import NOTE_TEXT, judge_request
 from app.services.llm import daily_limit_message, estimate_tokens, rate_limit_wait_seconds, rate_limited_event, sse, usage_from
 from app.services.metrics import log_cycle, log_llm_call, log_tts_call
 from app.services.profiler import add_span, get_traces, init_traces, trace
@@ -149,6 +156,40 @@ class ScriptStream:
         return "".join(out)
 
 
+class _WriterAhead:
+    """The writer's first attempt, started before the judge has decided. A separate task streams it into a buffer;
+    nothing in the buffer reaches the reader or the voice until take() is called (after a WRITE verdict). An error
+    is kept and raised from take(), where the writer's own retry and rate-limit handling deals with it."""
+
+    def __init__(self, source):
+        self.started_at = time.perf_counter()
+        self._buffer: asyncio.Queue = asyncio.Queue()
+        self._task = asyncio.create_task(self._pump(source))
+
+    async def _pump(self, source) -> None:
+        try:
+            async for chunk in source:
+                await self._buffer.put(("chunk", chunk))
+        except Exception as err:
+            await self._buffer.put(("error", err))
+        else:
+            await self._buffer.put(("end", None))
+
+    async def take(self):
+        while True:
+            kind, value = await self._buffer.get()
+            if kind == "chunk":
+                yield value
+            elif kind == "error":
+                raise value
+            else:
+                return
+
+    async def cancel(self) -> None:
+        self._task.cancel()
+        await asyncio.gather(self._task, return_exceptions=True)
+
+
 def _unusable_input(user_text: str, target_style: str) -> Optional[str]:
     """Input with no letters at all can be turned down at once, for certain and without spending any tokens."""
     if not _LETTER_RE.search(user_text or ""):
@@ -179,13 +220,33 @@ async def stream_rewrite(
     events: asyncio.Queue = asyncio.Queue()       # SSE strings, plus finished tasks as sentinels
     pieces: asyncio.Queue = asyncio.Queue()       # script pieces for the voice (None = end)
     stream = ScriptStream()
+    judge: dict = {}                              # the safety judge's decision, when it runs
 
     async def write_script() -> Optional[dict]:
-        """Groq → ScriptStream → events (+ pieces for the voice). Returns the token usage."""
-        nonlocal stream
-        with trace("Prompt Template Render", category="compute", template="voxis_prompt") as span:
-            prompt_value = await voxis_prompt.ainvoke({"user_text": user_text, "target_style": target_style})
+        """(Safety judge →) Groq → ScriptStream → events (+ pieces for the voice). Returns the token usage."""
+        template, template_name = (writer_prompt, "writer_prompt") if SAFETY_JUDGE else (voxis_prompt, "voxis_prompt")
+        with trace("Prompt Template Render", category="compute", template=template_name) as span:
+            prompt_value = await template.ainvoke({"user_text": user_text, "target_style": target_style})
             span["meta"]["prompt_chars"] = len(prompt_value.to_string())
+
+        ahead = _WriterAhead(llm.get_llm().astream(prompt_value)) if SAFETY_JUDGE and JUDGE_PARALLEL else None
+        try:
+            return await _write(prompt_value, ahead)
+        finally:
+            if ahead:
+                await ahead.cancel()        # a refusal, an abandoned request or an error: the writer stops here
+
+    async def _write(prompt_value, ahead: Optional[_WriterAhead]) -> Optional[dict]:
+        nonlocal stream
+        if SAFETY_JUDGE:
+            with trace("Safety Judge", category="network", model=LLM_MODEL, parallel=bool(ahead)) as span:
+                judge.update(await judge_request(user_text, target_style, notify=events.put))
+                span["meta"].update(label=judge["label"], attempts=judge["attempts"])
+            if not judge["write"]:
+                await pieces.put(None)
+                return None
+            if judge["label"] == "WRITE_NOTE":
+                await events.put(sse({"type": "note", "text": NOTE_TEXT}))
 
         usage = None
         attempt = waits = 0
@@ -210,7 +271,11 @@ async def stream_rewrite(
             try:
                 with trace("Groq LLM Stream Generation", category="network", model=LLM_MODEL, attempt=attempt) as span:
                     t_stream, first = time.perf_counter(), True
-                    async for chunk in llm.get_llm().astream(messages):
+                    if ahead:                   # the first attempt was already started alongside the judge
+                        source, t_stream, ahead = ahead.take(), ahead.started_at, None
+                    else:
+                        source = llm.get_llm().astream(messages)
+                    async for chunk in source:
                         usage = usage_from(chunk) or usage
                         token = chunk.content if isinstance(chunk.content, str) else ""
                         if not token:
@@ -293,6 +358,13 @@ async def stream_rewrite(
                 raise item.exception()
             if item is not writer:
                 continue
+            if judge and not judge["write"]:
+                await log_llm_call(endpoint="safety-judge", model=LLM_MODEL, prompt_tokens=judge["input_tokens"],
+                                   completion_tokens=judge["output_tokens"], latency_ms=judge["ms"],
+                                   status=f"judge: {judge['label']}", user_key=user_key)
+                await rate_limiter.consume(user_key, judge["input_tokens"] + judge["output_tokens"])
+                yield sse({"type": "error", "message": judge["message"]})
+                return
 
             usage = item.result()
             script_ms = (time.perf_counter() - started) * 1000
@@ -300,6 +372,9 @@ async def stream_rewrite(
                 prompt_tokens, completion_tokens, token_source = usage.get("input_tokens", 0), usage.get("output_tokens", 0), "api"
             else:
                 prompt_tokens, completion_tokens, token_source = estimate_tokens(user_text + target_style), estimate_tokens(stream.script), "estimate"
+            if judge:
+                prompt_tokens += judge["input_tokens"]
+                completion_tokens += judge["output_tokens"]
             if stream.error:
                 await log_llm_call(endpoint=endpoint, model=LLM_MODEL, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                                    latency_ms=script_ms, status="rejected: INVALID_INPUT", user_key=user_key)
@@ -325,7 +400,8 @@ async def stream_rewrite(
         traces = get_traces()
         yield sse({"type": "done", "total_latency_ms": total_ms, "script_ms": script_ms, "detailed_latencies": traces,
                    "token_source": token_source, "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
-                   "first_audio_ms": audio.get("first_audio_ms")})
+                   "first_audio_ms": audio.get("first_audio_ms"),
+                   "judge": {k: judge[k] for k in ("label", "attempts", "ms")} if judge else None})
 
         # Bookkeeping runs concurrently and after the reader already has everything.
         writes = [
@@ -334,6 +410,10 @@ async def stream_rewrite(
             rate_limiter.consume(user_key, prompt_tokens + completion_tokens),
             log_cycle(cycle_type, total_ms, traces, user_key=user_key),
         ]
+        if judge:
+            writes.append(log_llm_call(endpoint="safety-judge", model=LLM_MODEL, prompt_tokens=judge["input_tokens"],
+                                       completion_tokens=judge["output_tokens"], latency_ms=judge["ms"],
+                                       status=f"judge: {judge['label']}", user_key=user_key))
         if speak:
             writes.append(log_tts_call(
                 voice=resolved_voice, char_count=audio.get("char_count", 0), duration_sec=audio.get("duration"),

@@ -64,6 +64,22 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 LLM_MODEL = os.getenv("LLM_MODEL", "qwen/qwen3.8-27b")
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.4"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2500"))
+
+# The safety judge: one short call that decides write / write with a note / refuse before the writer
+# runs (services/judge.py). Off by default: the owner switches it on after a live check in the browser
+# (docs/SAFETY_EVAL.md). SAFETY_JUDGE=off also brings the old behaviour back after a bad deploy.
+SAFETY_JUDGE = _env_bool("SAFETY_JUDGE", False)
+# With the judge on: start the writer at the same time and hold its output back until the verdict (on), or wait
+# for the verdict before starting the writer (off). The same prompts either way; parallel hides the judge's time.
+JUDGE_PARALLEL = _env_bool("JUDGE_PARALLEL", True)
+JUDGE_TIMEOUT_S = float(os.getenv("JUDGE_TIMEOUT_S", "3"))      # per attempt; p95 was about 1.1 s in the eval
+JUDGE_MAX_TOKENS = 24                                            # a label is a few tokens
+# The judge can run on its own model (Groq limits are per model, so it then has its own budget). Models that
+# reason before answering (gpt-oss) need room for that reasoning and a low effort setting; the reasoning is
+# hidden from the reply, which stays a single label.
+JUDGE_MODEL = os.getenv("JUDGE_MODEL", "").strip() or LLM_MODEL
+JUDGE_REASONING_EFFORT = os.getenv("JUDGE_REASONING_EFFORT", "low")
+JUDGE_REASONING_MAX_TOKENS = int(os.getenv("JUDGE_REASONING_MAX_TOKENS", "400"))
 # Whisper for the Coach's record/upload mode. large-v3 hears filler words
 # better than -turbo, and fillers are the Coach's headline metric.
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-large-v3")

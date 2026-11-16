@@ -107,3 +107,50 @@ voxis_prompt = ChatPromptTemplate.from_messages(
         ("human", HUMAN_PROMPT),
     ]
 )
+
+
+# ──────────────────────────────────────────────
+# WRITER-ONLY PROMPT (used when the safety judge has already decided)
+# ──────────────────────────────────────────────
+# The same prompt without the ERRORS section and without the ERROR option in the closing line:
+# the judge (prompts/judge.py) decides whether to write, so the writer is not offered a refusal.
+# In the safety eval the full prompt refused 5 of 6 borderline safe cases on its first call; this
+# version wrote all 6. It is a change to the writing prompt, so it ships only after the blind
+# quality comparison (evals/run_director_eval.py).
+
+# The minimal-change writer: today's prompt word for word, without the one instruction that lets it refuse. Only
+# four edits: the ERRORS heading becomes "ALWAYS WRITE THE SCRIPT", the sentence saying when to output an ERROR
+# line (and that line) is removed, and so is "Those are the only errors ... when in doubt, write the script."; the
+# closing human line loses "(or the single ERROR line)". Everything else, including all the writing guidance that
+# sat inside ERRORS, is unchanged. The earlier writer-only prompt dropped the whole section and paraphrased part of it
+# back, and lost the blind comparison on short and plain drafts (docs/SAFETY_EVAL.md); the owner chose this version
+# on 16 Nov 2026. tests/test_judge_pipeline.py checks that these are the only differences.
+_ERRORS_HEADING = "## ERRORS\n"
+_REFUSAL_RULE = SYSTEM_PROMPT[SYSTEM_PROMPT.index("If user_text is empty, only symbols or gibberish"):
+                              SYSTEM_PROMPT.index("Those are the only errors")]
+_LAST_RESORT = "Those are the only errors, and an error is a last resort: when in doubt, write the script. "
+# ANALYSIS step 2 also pointed at the error line; the writer has none (the judge answers UNUSABLE for a gibberish
+# style), so that one sentence goes too (owner, 16 Nov 2026).
+_STYLE_ERROR = " A style that is unrecognisable or impossible to model: output the error line."
+WRITER_SYSTEM_PROMPT = (SYSTEM_PROMPT.replace(_ERRORS_HEADING, "## ALWAYS WRITE THE SCRIPT\n", 1)
+                        .replace(_REFUSAL_RULE, "", 1).replace(_LAST_RESORT, "", 1).replace(_STYLE_ERROR, "", 1))
+WRITER_HUMAN_PROMPT = HUMAN_PROMPT.replace(" (or the single ERROR line)", "", 1)
+
+# Kept for a separate test later, not in any prompt: the FACTS rule the owner approved on 16 Nov 2026. Added to the
+# earlier writer-only prompt it did not stop invented or changed facts in one blind run, so it is tested on its own.
+FACTS_RULE = (
+    "## FACTS\n"
+    "Keep every name, number, date, time and stated fact exactly as the draft gives it, including its timing and tense: "
+    "\"opens Monday\" is still in the future. Add no facts the draft does not contain: no new numbers, dates, places, names, "
+    "quotes, events, results, or details about a product, room or person. Get colour from feeling, imagery and rhetoric "
+    "instead. This rule covers facts only: tone, humour, metaphor, imagery and storytelling stay as free and inventive as "
+    "the requested style asks, and fiction or an openly creative brief (a comic duel, a villain's monologue, a toast) may "
+    "invent its scenes and jokes, as long as nothing contradicts the draft.\n\n"
+)
+
+writer_prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", WRITER_SYSTEM_PROMPT),
+        ("human", WRITER_HUMAN_PROMPT),
+    ]
+)

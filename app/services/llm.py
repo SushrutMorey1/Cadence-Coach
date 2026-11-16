@@ -13,7 +13,8 @@ from typing import Optional
 import groq as groq_sdk
 import httpx
 from langchain_groq import ChatGroq
-from app.config import LLM_MODEL, LLM_TEMPERATURE, LLM_MAX_TOKENS, GROQ_API_KEY
+from app.config import (GROQ_API_KEY, JUDGE_MAX_TOKENS, JUDGE_MODEL, JUDGE_REASONING_EFFORT, JUDGE_REASONING_MAX_TOKENS,
+                        LLM_MAX_TOKENS, LLM_MODEL, LLM_TEMPERATURE)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,32 @@ def get_llm() -> ChatGroq:
             max_retries=0,
         )
     return _llm
+
+
+_judge_llm = None
+_REASONING_MODELS = ("gpt-oss",)          # models that think before answering; their reasoning needs room
+
+
+def judge_model_reasons(model: Optional[str] = None) -> bool:
+    """Whether the judge's model (or the one given) thinks before answering. Read at call time, not import time."""
+    return any(tag in (model or JUDGE_MODEL) for tag in _REASONING_MODELS)
+
+
+def get_judge_llm():
+    """The safety judge's model at temperature 0. On the writer's model: a bound copy with a few output tokens. On
+    its own model (JUDGE_MODEL): a separate client; a reasoning model gets a low effort, its reasoning hidden from the
+    reply, and room to think, so the reply is still a single label."""
+    global _judge_llm
+    if JUDGE_MODEL == LLM_MODEL:
+        model = get_llm()
+        return model.bind(temperature=0, max_tokens=JUDGE_MAX_TOKENS) if hasattr(model, "bind") else model
+    if _judge_llm is None:
+        options = {"max_tokens": JUDGE_MAX_TOKENS}
+        if judge_model_reasons():
+            options = {"max_tokens": JUDGE_REASONING_MAX_TOKENS, "reasoning_effort": JUDGE_REASONING_EFFORT, "reasoning_format": "hidden"}
+        logger.info("Initializing the safety judge on %s (%s)", JUDGE_MODEL, options)
+        _judge_llm = ChatGroq(model=JUDGE_MODEL, temperature=0, api_key=GROQ_API_KEY or "not-configured", max_retries=0, **options)
+    return _judge_llm
 
 
 async def warm_llm() -> None:

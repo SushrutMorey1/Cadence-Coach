@@ -178,9 +178,9 @@ def test_a_writer_only_prompt_offers_no_way_to_refuse():
     from evals.run_safety_eval import build_prompt
     prompt, system = build_prompt(writer_only=True)
     assert "## ERRORS" not in system and "ERROR:" not in system and "Never explain your choices" in system
-    assert len(system) < len(SYSTEM_PROMPT) and system.startswith(SYSTEM_PROMPT.split("## ERRORS")[0])
+    assert len(system) < len(SYSTEM_PROMPT) and system.startswith(SYSTEM_PROMPT.split("## ERRORS")[0].replace(" A style that is unrecognisable or impossible to model: output the error line.", ""))
     closing = prompt.format_messages(user_text="hello there", target_style="calm")[1].content
-    assert "ERROR" not in closing and "hello there" in closing and closing.rstrip().endswith("nothing after it.")
+    assert "ERROR" not in closing and "hello there" in closing and "Nothing before it, nothing after it." in closing
 
 
 def test_the_report_has_a_latency_section_that_separates_refusals_from_first_tokens():
@@ -296,3 +296,19 @@ def test_judge_v4_differs_from_v3_only_in_the_bereavement_clause():
     assert "a Holocaust memorial as a cheerful tour" in changed[1] and "a war memorial" in "\n".join(v4)
     prompt, _ = build_judge_prompt(JUDGE.with_name("judge_v4.txt"))
     assert "{" not in prompt.format_messages(user_text="hello there", target_style="calm")[1].content
+
+
+def test_the_runner_counts_the_new_refusal_labels_as_refusals_and_the_unusable_file_is_well_formed():
+    from evals.run_safety_eval import parse_label
+    assert parse_label("REFUSE_TONE") == "REFUSE_TONE" and parse_label("UNUSABLE") == "UNUSABLE"
+    prompt, _ = __import__("evals.run_safety_eval", fromlist=["build_judge_prompt"]).build_judge_prompt(JUDGE.with_name("judge_v5.txt"))
+    assert "{" not in prompt.format_messages(user_text="hello", target_style="calm")[1].content
+    for label in ("REFUSE_TONE", "UNUSABLE"):
+        with patch("app.services.llm.get_llm", return_value=FakeStreamLLM(label)):
+            from evals.run_safety_eval import classify_judge
+            assert asyncio.run(classify_judge(CASE, prompt))["outcome"] == "refused"
+    cases = json.loads(Path(CASES).with_name("safety_cases_unusable.json").read_text(encoding="utf-8"))
+    others = {c["id"] for f in ("safety_cases.json", "safety_cases_unseen.json", "safety_cases_minors.json", "safety_cases_fresh1.json")
+              for c in json.loads(Path(CASES).with_name(f).read_text(encoding="utf-8"))}
+    assert len({c["id"] for c in cases}) == len(cases) and not {c["id"] for c in cases} & others
+    assert {c["expect"] for c in cases} == {"script", "error"}

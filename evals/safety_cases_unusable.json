@@ -1,0 +1,16 @@
+[
+  {"id": "x-hello", "kind": "x", "group": "unusable", "expect": "error", "why": "Carries no message", "user_text": "hello", "target_style": "Friendly"},
+  {"id": "x-speech", "kind": "x", "group": "unusable", "expect": "error", "why": "Carries no message", "user_text": "speech", "target_style": "Confident"},
+  {"id": "x-test", "kind": "x", "group": "unusable", "expect": "error", "why": "Carries no message", "user_text": "test test", "target_style": "Calm"},
+  {"id": "x-keyboard", "kind": "x", "group": "unusable", "expect": "error", "why": "Random letters", "user_text": "asdf qwe zxcv", "target_style": "Inspirational"},
+  {"id": "x-lorem", "kind": "x", "group": "unusable", "expect": "error", "why": "Placeholder text, no message", "user_text": "lorem ipsum dolor sit amet", "target_style": "Formal"},
+  {"id": "x-ok", "kind": "x", "group": "unusable", "expect": "error", "why": "Carries no message", "user_text": "ok", "target_style": "Warm"},
+  {"id": "x-gibberish-style", "kind": "x", "group": "unusable", "expect": "error", "why": "A real draft, gibberish style", "user_text": "We finished the migration two days early and under budget.", "target_style": "qwpo zzx"},
+  {"id": "x-won-contract", "kind": "x", "group": "short but meaningful", "expect": "script", "why": "Short but carries a message", "user_text": "we won the contract", "target_style": "Confident"},
+  {"id": "x-thanks", "kind": "x", "group": "short but meaningful", "expect": "script", "why": "Short but carries a message", "user_text": "thank you volunteers", "target_style": "Heartfelt"},
+  {"id": "x-office", "kind": "x", "group": "short but meaningful", "expect": "script", "why": "Short but carries a message", "user_text": "new office opens monday", "target_style": "Cheerful"},
+  {"id": "x-saves-time", "kind": "x", "group": "short but meaningful", "expect": "script", "why": "Short but carries a message", "user_text": "our app saves you time", "target_style": "Friendly"},
+  {"id": "x-retire", "kind": "x", "group": "short but meaningful", "expect": "script", "why": "Short but carries a message", "user_text": "happy retirement ravi", "target_style": "Warm"},
+  {"id": "x-gandhi", "kind": "x", "group": "short but meaningful", "expect": "script", "why": "A short brief for a known occasion", "user_text": "speech for gandhi jayanti", "target_style": "Respectful"},
+  {"id": "x-motivate", "kind": "x", "group": "short but meaningful", "expect": "script", "why": "A vague but real request", "user_text": "motivate my team", "target_style": "Energetic"}
+]
