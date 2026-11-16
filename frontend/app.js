@@ -354,7 +354,27 @@ async function readSSEStream(res, onEvent) {
   if (buffer.trim()) handleLine(buffer);
 }
 
+/** The fixed note for a request near the edge. It sits in its own element above the script,
+ *  because script_done replaces the script box's contents. */
+function showDirectorNote(text) {
+  let note = document.getElementById('directorNote');
+  if (!note) {
+    note = document.createElement('p');
+    note.id = 'directorNote';
+    note.className = 'director-note';
+    note.setAttribute('role', 'note');
+    els.directorDisplayScript.insertAdjacentElement('beforebegin', note);
+  }
+  note.textContent = text;
+}
+
+function clearDirectorNote() {
+  const note = document.getElementById('directorNote');
+  if (note) note.remove();
+}
+
 function resetDirectorOutput() {
+  clearDirectorNote();
   segPlayer.stop();
   segState.ready = 0;
   segState.done = false;
@@ -443,6 +463,9 @@ async function runDirector({ speak }) {
 
     await readSSEStream(res, (event) => {
       switch (event.type) {
+        case 'note':
+          showDirectorNote(event.text || '');
+          break;
         case 'token':
           streamText += event.text;
           if (streamEl) streamEl.textContent = streamText;

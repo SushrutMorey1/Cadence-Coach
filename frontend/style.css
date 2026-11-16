@@ -1561,3 +1561,15 @@ audio::-webkit-media-controls-panel { background: var(--bg-elevated); }
   .coach-live-list { grid-template-columns: 1fr; }
   .wf-axis { margin-left: 0; }
 }
+
+/* The fixed note shown above a script written for a request near the edge (services/judge.py). */
+.director-note {
+  margin: 0 0 0.75rem;
+  padding: 0.6rem 0.8rem;
+  border-left: 3px solid var(--color-warning);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
