@@ -441,6 +441,26 @@ Runs: `evals/run_latency_check.py --speak` (real Azure speech; run `evals/out/la
 
 Between the first word and the first sound: 0.38 s (today), 0.45 s (series), 0.33 s (parallel). One slow request (today's tiny-win: Azure took 1.1 s for a 20-character piece) is a tail event, not a pattern. Parallel was as fast as today's prompt here and 0.2 to 0.3 s ahead of series, as designed; with 5 requests per set-up, treat 0.56 against 0.61 s as a tie.
 
+**Every request, step by step (voice round, run `latency-speak-20261118-110452`)** (first word and first sound in seconds; the other columns in milliseconds). "Judge" is the judge call, "Writer's own first text" is the time to the writer's first text in a parallel request, "First piece ready" is when the first speech piece was cut and sent to Azure, and "Azure render" is how long Azure took to turn that piece into audio.
+
+| Case | Setup | First word | First sound | Word → sound | Judge | Writer's own first text | First piece ready | Piece chars | Azure render |
+|---|---|---|---|---|---|---|---|---|---|
+| tiny-win | today | 1.79 | 2.93 | 1.14 | – | – | 1803 | 20 | **1123** |
+| tiny-win | series | 0.73 | 1.21 | 0.48 | 395 | – | 755 | 20 | 446 |
+| tiny-win | parallel | 0.53 | 0.81 | 0.28 | 328 | 491 | 568 | 20 | 238 |
+| vague-professional | today | 0.55 | 0.94 | 0.38 | – | – | 590 | 70 | 346 |
+| vague-professional | series | 0.70 | 1.14 | 0.43 | 367 | – | 743 | 143 | 392 |
+| vague-professional | parallel | 0.56 | 0.90 | 0.34 | 398 | 544 | 584 | 70 | 314 |
+| boxing-pep | today | 0.67 | 1.11 | 0.44 | – | – | 688 | 121 | 416 |
+| boxing-pep | series | 0.81 | 1.44 | 0.63 | 463 | – | 957 | 96 | 478 |
+| boxing-pep | parallel | 0.60 | 0.92 | 0.33 | 348 | 581 | 624 | 46 | 295 |
+| technical-explainer | today | 0.61 | 0.96 | 0.34 | – | – | 635 | 43 | 320 |
+| technical-explainer | series | 0.75 | 1.05 | 0.31 | 450 | – | 766 | 48 | 285 |
+| technical-explainer | parallel | 0.54 | 0.84 | 0.30 | 414 | 520 | 560 | 48 | 276 |
+| wedding-toast | today | 0.61 | 0.95 | 0.34 | – | – | 615 | 63 | 337 |
+| wedding-toast | series | 0.69 | 1.14 | 0.45 | 350 | – | 746 | 108 | 387 |
+| wedding-toast | parallel | 0.56 | 0.95 | 0.38 | 376 | 545 | 591 | 53 | 351 |
+
 **Where the time goes, in a parallel request (medians of the traces)**
 
 | Step | Time | Share of the first sound |
