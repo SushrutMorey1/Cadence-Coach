@@ -54,6 +54,23 @@ That is too few runs to call the current prompt faster, since a longer prompt sh
 
 Every performance shows its own numbers under the player, and the Lab keeps the full span timeline.
 
+### The safety judge's cost in time: today's prompt, series and parallel
+
+With `SAFETY_JUDGE` on, a short judge call runs beside the writer instead of before it. Three set-ups were timed live, taking turns in a rotating order per case, 5 written requests each, with real Groq and Azure speech, from one machine in India (not a deployed server). Seconds from sending the request:
+
+| Case | Today's prompt: first word / first sound | Series (judge, then writer) | Parallel (both at once, the default) |
+|---|---|---|---|
+| tiny-win | 1.79 / 2.93 | 0.73 / 1.21 | 0.53 / 0.81 |
+| vague-professional | 0.55 / 0.94 | 0.70 / 1.14 | 0.56 / 0.90 |
+| boxing-pep | 0.67 / 1.11 | 0.81 / 1.44 | 0.60 / 0.92 |
+| technical-explainer | 0.61 / 0.96 | 0.75 / 1.05 | 0.54 / 0.84 |
+| wedding-toast | 0.61 / 0.95 | 0.69 / 1.14 | 0.56 / 0.95 |
+| **Median** | 0.61 / 0.96 | 0.73 / 1.14 | **0.56 / 0.90** |
+
+A refused request (an earlier text-only round of one request per set-up) got its answer in 0.41 s in parallel, 0.78 s in series and 1.00 s with today's prompt, which refused twice.
+
+**What it shows.** Parallel is level with today's prompt (0.56 s against 0.61 s is a tie at 5 requests) and 0.2 to 0.3 s ahead of running the judge first. The judge takes about 0.38 s and finishes before the writer's first text (about 0.54 s), so its time is hidden. The cost is tokens, not time: about 740 more input tokens per request. **What it does not show:** real-user traffic, a deployed server, or a ranking beyond a few requests (single requests vary by up to a second). The full breakdown is in [docs/SAFETY_EVAL.md](docs/SAFETY_EVAL.md).
+
 ## Quality
 
 The Director prompt is checked with a blind test (`evals/`): 20 cases, two prompts side by side in random order with audio, judged by ear without knowing which is which. The result below is one listener, so it is evidence and not proof.
