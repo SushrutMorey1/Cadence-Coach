@@ -66,9 +66,9 @@ LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.4"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2500"))
 
 # The safety judge: one short call that decides write / write with a note / refuse before the writer
-# runs (services/judge.py). Off by default: the owner switches it on after a live check in the browser
-# (docs/SAFETY_EVAL.md). SAFETY_JUDGE=off also brings the old behaviour back after a bad deploy.
-SAFETY_JUDGE = _env_bool("SAFETY_JUDGE", False)
+# runs (services/judge.py). On by default since 18 Nov 2026 (docs/SAFETY_EVAL.md, "Status at a glance").
+# SAFETY_JUDGE=off is the switch back to the refusal-inside-the-prompt writer after a bad deploy.
+SAFETY_JUDGE = _env_bool("SAFETY_JUDGE", True)
 # With the judge on: start the writer at the same time and hold its output back until the verdict (on), or wait
 # for the verdict before starting the writer (off). The same prompts either way; parallel hides the judge's time.
 JUDGE_PARALLEL = _env_bool("JUDGE_PARALLEL", True)

@@ -20,6 +20,7 @@ os.environ["GROQ_API_KEY"] = "test-groq-key"
 os.environ["AZURE_SPEECH_KEY"] = "test-azure-key"
 os.environ["SESSION_SECRET_KEY"] = "test-session-secret"
 os.environ["STARTUP_CHECKS"] = "0"        # no network at boot
+os.environ["SAFETY_JUDGE"] = "off"        # the app default is ON; tests that need it patch it (test_judge_default.py)
 for _k in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"):
     os.environ.pop(_k, None)
 
