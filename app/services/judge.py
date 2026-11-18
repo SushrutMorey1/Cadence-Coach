@@ -39,6 +39,7 @@ ATTEMPTS = 2
 _LABEL_RE = re.compile(r"\b(WRITE_NOTE|WRITE|REFUSE_TONE|REFUSE|UNUSABLE|UNSURE)\b")
 
 # What the reader sees. Drafts for the owner to word as they like.
+CHECKING_TEXT = "Checking your request…"      # shown at once while the judge decides, in place of the blinking cursor
 NOTE_TEXT = "This piece touches a sensitive subject. It was written for practice and does not reflect the views of Cadence Coach."
 REFUSED_MESSAGE = ("This request can't be written: it asks for a speech that attacks or harms people "
                    "(hatred, violence, illegal acts, or content that puts children at risk). Please change the request.")

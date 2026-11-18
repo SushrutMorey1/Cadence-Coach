@@ -13,7 +13,7 @@ arrive they go three places at once:
 so the first sentence is being spoken while the rest is still being written.
 The stream is one SSE response; the two sides talk to it through a queue.
 
-Events:  note · token · rate_limited · retry · script_done · audio_segment · audio_done · done · error
+Events:  status · note · token · rate_limited · retry · script_done · audio_segment · audio_done · done · error
 
 With SAFETY_JUDGE on, a short judge call (services/judge.py) decides: a refusal label, UNSURE twice or a judge
 that is too slow twice ends the stream with `error` and nothing is shown or spoken; WRITE_NOTE adds a `note`
@@ -33,7 +33,7 @@ from langchain_core.messages import HumanMessage
 from app.config import JUDGE_PARALLEL, LLM_MODEL, SAFETY_JUDGE
 from app.prompts.voxis import voxis_prompt, writer_prompt
 from app.services import llm
-from app.services.judge import NOTE_TEXT, judge_request
+from app.services.judge import CHECKING_TEXT, NOTE_TEXT, judge_request
 from app.services.llm import daily_limit_message, estimate_tokens, rate_limit_wait_seconds, rate_limited_event, sse, usage_from
 from app.services.metrics import log_cycle, log_llm_call, log_tts_call
 from app.services.profiler import add_span, get_traces, init_traces, trace
@@ -163,12 +163,15 @@ class _WriterAhead:
 
     def __init__(self, source):
         self.started_at = time.perf_counter()
+        self.first_chunk_at = None         # when the writer's first text arrived, before any verdict released it
         self._buffer: asyncio.Queue = asyncio.Queue()
         self._task = asyncio.create_task(self._pump(source))
 
     async def _pump(self, source) -> None:
         try:
             async for chunk in source:
+                if self.first_chunk_at is None and isinstance(chunk.content, str) and chunk.content:
+                    self.first_chunk_at = time.perf_counter()
                 await self._buffer.put(("chunk", chunk))
         except Exception as err:
             await self._buffer.put(("error", err))
@@ -224,6 +227,8 @@ async def stream_rewrite(
 
     async def write_script() -> Optional[dict]:
         """(Safety judge →) Groq → ScriptStream → events (+ pieces for the voice). Returns the token usage."""
+        if SAFETY_JUDGE:
+            await events.put(sse({"type": "status", "text": CHECKING_TEXT}))      # the first event, before the judge answers
         template, template_name = (writer_prompt, "writer_prompt") if SAFETY_JUDGE else (voxis_prompt, "voxis_prompt")
         with trace("Prompt Template Render", category="compute", template=template_name) as span:
             prompt_value = await template.ainvoke({"user_text": user_text, "target_style": target_style})
@@ -271,6 +276,7 @@ async def stream_rewrite(
             try:
                 with trace("Groq LLM Stream Generation", category="network", model=LLM_MODEL, attempt=attempt) as span:
                     t_stream, first = time.perf_counter(), True
+                    held = ahead
                     if ahead:                   # the first attempt was already started alongside the judge
                         source, t_stream, ahead = ahead.take(), ahead.started_at, None
                     else:
@@ -283,6 +289,8 @@ async def stream_rewrite(
                         if first:
                             first = False
                             add_span("Time to First Token (TTFT)", t_stream, time.perf_counter(), category="network")
+                            if held and held.first_chunk_at:        # parallel: the writer's own time, before the verdict released it
+                                add_span("Writer first chunk (before the verdict)", t_stream, held.first_chunk_at, category="network")
                         await deliver(*stream.feed(token))
                     await deliver(*stream.finish())
                     span["meta"]["output_chars"] = len(stream.script)

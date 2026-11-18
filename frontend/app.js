@@ -463,10 +463,14 @@ async function runDirector({ speak }) {
 
     await readSSEStream(res, (event) => {
       switch (event.type) {
+        case 'status':          // the judge is deciding: say so until the first word replaces this
+          if (streamEl && !streamText) { streamEl.textContent = event.text || ''; streamEl.classList.add('is-status'); }
+          break;
         case 'note':
           showDirectorNote(event.text || '');
           break;
         case 'token':
+          if (streamEl) streamEl.classList.remove('is-status');
           streamText += event.text;
           if (streamEl) streamEl.textContent = streamText;
           break;

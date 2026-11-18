@@ -57,7 +57,13 @@ class FakeJudge:
                               response_metadata={"finish_reason": "stop"})
 
 
-def post(judge, writer=None, speak_fn=None, path="/api/rewrite/stream", judge_on=True, parallel=False, **extra):
+def post(*args, keep_status=False, **kwargs):
+    """post_raw() without the `status` cue unless asked for, so the tests below keep checking the events that matter."""
+    events, writer = post_raw(*args, **kwargs)
+    return (events if keep_status else [e for e in events if e["type"] != "status"]), writer
+
+
+def post_raw(judge, writer=None, speak_fn=None, path="/api/rewrite/stream", judge_on=True, parallel=False, **extra):
     """parallel=False runs the judge before the writer (series), so `writer.calls == 0` shows a refused request never
     reached the writer; the parallel tests check the same promises with the writer already running."""
     writer = writer or FakeStreamLLM(SCRIPT_TEXT, step=15)
@@ -209,7 +215,7 @@ def test_a_refused_request_leaves_no_task_running():
             patch("app.services.llm.get_judge_llm", return_value=FakeJudge("REFUSE")), \
             patch("app.services.llm.get_llm", return_value=FakeStreamLLM(SCRIPT_TEXT)):
         events, leftover = asyncio.run(go())
-    assert kinds(events) == ["error"] and leftover == []
+    assert [k for k in kinds(events) if k != "status"] == ["error"] and leftover == []
 
 
 def test_the_writer_is_todays_prompt_minus_only_the_way_to_refuse():
@@ -288,3 +294,24 @@ def test_a_non_reasoning_judge_model_keeps_the_short_label_budget():
     with patch.object(llm_service, "JUDGE_MODEL", "some/other-model"), patch.object(llm_service, "_judge_llm", None):
         judge = llm_service.get_judge_llm()
     assert judge.max_tokens == llm_service.JUDGE_MAX_TOKENS and judge.reasoning_effort is None
+
+
+# ── the "checking your request" cue ──
+
+def test_the_status_cue_is_the_first_event_when_the_judge_is_on_and_absent_when_it_is_off():
+    from app.services.judge import CHECKING_TEXT
+    for parallel in (False, True):
+        for label in ("WRITE", "WRITE_NOTE", "REFUSE"):
+            events, _ = post(FakeJudge(label), keep_status=True, parallel=parallel)
+            assert kinds(events)[0] == "status" and events[0]["text"] == CHECKING_TEXT, (label, parallel)
+            assert kinds(events).count("status") == 1
+        events, _ = post(FakeJudge("WRITE_NOTE"), keep_status=True, parallel=parallel)
+        assert kinds(events)[:2] == ["status", "note"]
+    events, _ = post(FakeJudge(RuntimeError("must not be called")), judge_on=False, keep_status=True)
+    assert "status" not in kinds(events) and kinds(events)[0] == "token"
+
+
+def test_the_page_shows_the_status_in_place_of_the_cursor_and_clears_it_on_the_first_word():
+    js = (ROOT / "frontend" / "app.js").read_text(encoding="utf-8")
+    assert "case 'status':" in js and "classList.add('is-status')" in js and "classList.remove('is-status')" in js
+    assert ".streaming-text.is-status" in (ROOT / "frontend" / "style.css").read_text(encoding="utf-8")

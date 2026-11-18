@@ -69,7 +69,14 @@ async def collect(gen):
     return events, stamps
 
 
-def run(judge, writer, speak=False, speak_fn=None):
+def run(*args, **kwargs):
+    """_run_raw() without the `status` cue (it is covered in test_judge_pipeline.py), timestamps kept in step."""
+    events, stamps, t0, leftover = _run_raw(*args, **kwargs)
+    keep = [i for i, e in enumerate(events) if e["type"] != "status"]
+    return [events[i] for i in keep], [stamps[i] for i in keep], t0, leftover
+
+
+def _run_raw(judge, writer, speak=False, speak_fn=None):
     async def go():
         t0 = time.perf_counter()
         events, stamps = await collect(stream_rewrite("welcome back we ship monday", "calm CEO", speak=speak))
@@ -150,3 +157,25 @@ def test_a_request_abandoned_while_the_judge_thinks_leaves_nothing_running():
     assert leftover == [] and writer.calls == 1
     total_chunks = -(-len(SCRIPT_TEXT) // 4)
     assert len(writer.produced) < total_chunks, "the writer kept going after the request was abandoned"
+
+
+def test_the_trace_shows_whether_the_judge_or_the_writer_was_the_slower_one():
+    from app.services.director import stream_rewrite
+
+    def spans(parallel):
+        judge, writer = TimedJudge("WRITE", delay=0.3), TimedWriter(SCRIPT_TEXT, step=12, delay=0.02)
+
+        async def go():
+            events, _ = await collect(stream_rewrite("welcome back we ship monday", "calm CEO", speak=False))
+            return {s["name"]: s for s in next(e for e in events if e["type"] == "done")["detailed_latencies"]}
+
+        with patch("app.services.director.SAFETY_JUDGE", True), patch("app.services.director.JUDGE_PARALLEL", parallel), \
+                patch("app.services.llm.get_judge_llm", return_value=judge), patch("app.services.llm.get_llm", return_value=writer), \
+                patch("app.services.judge.JUDGE_TIMEOUT_S", 2.0):
+            return asyncio.run(go())
+
+    parallel = spans(True)
+    own = parallel["Writer first chunk (before the verdict)"]["latency_ms"]
+    assert own < parallel["Safety Judge"]["latency_ms"] - 100, "the writer's own first chunk came well before the verdict"
+    assert parallel["Time to First Token (TTFT)"]["latency_ms"] >= parallel["Safety Judge"]["latency_ms"] - 20
+    assert "Writer first chunk (before the verdict)" not in spans(False)

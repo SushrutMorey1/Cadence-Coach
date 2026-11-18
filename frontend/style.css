@@ -1573,3 +1573,6 @@ audio::-webkit-media-controls-panel { background: var(--bg-elevated); }
   font-size: 0.9rem;
   line-height: 1.45;
 }
+
+/* "Checking your request…" while the safety judge decides (replaced by the first word). */
+.streaming-text.is-status { color: var(--text-muted); font-style: italic; }
