@@ -71,6 +71,28 @@ A refused request (an earlier text-only round of one request per set-up) got its
 
 **What it shows.** Parallel is level with today's prompt (0.56 s against 0.61 s is a tie at 5 requests) and 0.2 to 0.3 s ahead of running the judge first. The judge takes about 0.38 s and finishes before the writer's first text (about 0.54 s), so its time is hidden. The cost is tokens, not time: about 740 more input tokens per request. **What it does not show:** real-user traffic, a deployed server, or a ranking beyond a few requests (single requests vary by up to a second). The full breakdown is in [docs/SAFETY_EVAL.md](docs/SAFETY_EVAL.md).
 
+**Every request, step by step** (first word and first sound in seconds; the other columns in milliseconds). "Judge" is the judge call, "Writer's own first text" is the time to the writer's first text in a parallel request, "First piece ready" is when the first speech piece was cut and sent to Azure, and "Azure render" is how long Azure took to turn that piece into audio.
+
+| Case | Setup | First word | First sound | Word → sound | Judge | Writer's own first text | First piece ready | Piece chars | Azure render |
+|---|---|---|---|---|---|---|---|---|---|
+| tiny-win | today | 1.79 | 2.93 | 1.14 | – | – | 1803 | 20 | **1123** |
+| tiny-win | series | 0.73 | 1.21 | 0.48 | 395 | – | 755 | 20 | 446 |
+| tiny-win | parallel | 0.53 | 0.81 | 0.28 | 328 | 491 | 568 | 20 | 238 |
+| vague-professional | today | 0.55 | 0.94 | 0.38 | – | – | 590 | 70 | 346 |
+| vague-professional | series | 0.70 | 1.14 | 0.43 | 367 | – | 743 | 143 | 392 |
+| vague-professional | parallel | 0.56 | 0.90 | 0.34 | 398 | 544 | 584 | 70 | 314 |
+| boxing-pep | today | 0.67 | 1.11 | 0.44 | – | – | 688 | 121 | 416 |
+| boxing-pep | series | 0.81 | 1.44 | 0.63 | 463 | – | 957 | 96 | 478 |
+| boxing-pep | parallel | 0.60 | 0.92 | 0.33 | 348 | 581 | 624 | 46 | 295 |
+| technical-explainer | today | 0.61 | 0.96 | 0.34 | – | – | 635 | 43 | 320 |
+| technical-explainer | series | 0.75 | 1.05 | 0.31 | 450 | – | 766 | 48 | 285 |
+| technical-explainer | parallel | 0.54 | 0.84 | 0.30 | 414 | 520 | 560 | 48 | 276 |
+| wedding-toast | today | 0.61 | 0.95 | 0.34 | – | – | 615 | 63 | 337 |
+| wedding-toast | series | 0.69 | 1.14 | 0.45 | 350 | – | 746 | 108 | 387 |
+| wedding-toast | parallel | 0.56 | 0.95 | 0.38 | 376 | 545 | 591 | 53 | 351 |
+
+Reading it: in every parallel request the judge (328 to 414 ms) finished before the writer's first text (491 to 581 ms), which is why it adds no wait. The one slow request, today's tiny-win, was Azure taking 1,123 ms for a 20-character piece, not the model.
+
 ## Quality
 
 The Director prompt is checked with a blind test (`evals/`): 20 cases, two prompts side by side in random order with audio, judged by ear without knowing which is which. The result below is one listener, so it is evidence and not proof.
