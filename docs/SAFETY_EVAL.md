@@ -2,11 +2,13 @@
 
 Files: `evals/safety_cases.json` (120 labelled cases), `evals/run_safety_eval.py` (runner), `evals/variants/` (prompt variants under test), `tests/test_safety_eval.py` (offline tests). Results of a run go to `evals/out/safety-<time>/` (results.json, report.md; git-ignored).
 
-## Status at a glance (16 November 2026)
+## Status at a glance (updated 18 November 2026)
+
+**Decision, 18 Nov 2026: the judge is ON by default.** The owner switched it on after the latency and quality tests, instead of waiting for a live browser check. The evidence: (1) the judge makes about 1 wrong refusal in 110 safe cases and missed 0 of 52 harmful ones; (2) in the fair blind A/B on the on-screen text the new pipeline is at least as good as today's prompt (10 to 6, within chance, so "not worse", not "better"); (3) in the live latency rounds the parallel pipeline's first word (median 0.68 s) is about the same as today's prompt (0.58 s) and its refusals are faster (0.41 s against 1.00 s), because the judge runs beside the writer and is hidden behind it. What this does not show: no real-user traffic yet, no live browser check, and the series/parallel ranking rests on a few requests. Costs: about 740 extra input tokens per request (about +23%), so fewer runs fit in the free Groq budget; a refused request now costs less than before, since the writer is cancelled. Rollback: `SAFETY_JUDGE=off` restores the old all-in-one prompt with no code change.
 
 **The problem.** The all-in-one writer prompt refuses many safe requests on its first call and is then corrected by a visible re-ask. Each such request costs about twice the tokens (about 2,500 input tokens a call) and waits about half a second longer. Wrongly refusing is worse for the product than the tokens: an earlier version of this feature over-refused and was removed, so nothing refuses in code without evidence.
 
-**What is built** (all in the app, behind `SAFETY_JUDGE`, which is OFF by default: nothing changes for users until the owner switches it on)
+**What is built** (all in the app, behind `SAFETY_JUDGE`, which has been ON by default since 18 Nov 2026; `SAFETY_JUDGE=off` is the rollback)
 - A short **judge** call (`judge_v5`, about 740 input tokens, run on the writer's model, Qwen) decides first: WRITE, WRITE_NOTE (written, with a fixed note shown above the script), REFUSE (harm), REFUSE_TONE (a style that makes light of a death or tragedy), UNUSABLE (gibberish, or too little to write from) or UNSURE. Every refusal ends the stream with one `error` event and a message that says why. UNSURE or a judge slower than 3 s gets one forced-choice retry, then the request is refused. There is no fallback to the old all-in-one prompt.
 - A **writer** prompt that is today's prompt word for word minus only the refusal mechanics (the ERRORS rule, the ERROR line, one dangling sentence about it, and the closing line's mention of it).
 - **Parallel by default** (`JUDGE_PARALLEL`): the writer starts at the same moment as the judge and its output is held back until the verdict; a refusal or an abandoned request cancels it. `JUDGE_PARALLEL=off` gives the series order.
@@ -15,7 +17,7 @@ Files: `evals/safety_cases.json` (120 labelled cases), `evals/run_safety_eval.py
 
 | Setting | Default | What it does |
 |---|---|---|
-| `SAFETY_JUDGE` | off | the switch; off is also the rollback after a bad deploy |
+| `SAFETY_JUDGE` | on | the switch; off restores the old all-in-one prompt (rollback after a bad deploy) |
 | `JUDGE_PARALLEL` | on | judge and writer together (on) or the judge first (off) |
 | `JUDGE_TIMEOUT_S` | 3 | per judge attempt; two slow attempts end with a "try again" message |
 | `JUDGE_MODEL` | the writer's model (`qwen/qwen3.8-27b`) | another Groq model gets its own client and its own budget |
@@ -49,7 +51,7 @@ How to read it: rows 3 to 6 compare a fresh script against an old script that ha
 | Request today's prompt wrongly refuses first | about 5,100 | about 3,060 |
 | Harmful request | about 5,100 to 5,200 (refused twice) | about 740 in series; about 3,060 in parallel, since the writer had already started |
 
-*Latency, one live round (4 written requests and 1 harmful, 3 set-ups taking turns, time to the first word).* Median: today 0.58 s, series 0.82 s, parallel 0.68 s. A refusal arrived in 0.41 s (parallel) and 0.78 s (series) against 1.00 s for today's prompt and its re-ask. Single requests swing by up to a second (1.89, 1.44 and 1.25 s outliers in three different set-ups), so one round cannot rank series against parallel; the runner records the total only, not judge time against writer time.
+*Latency, one live round (4 written requests and 1 harmful, 3 set-ups taking turns, time to the first word).* Median: today 0.58 s, series 0.82 s, parallel 0.68 s. A refusal arrived in 0.41 s (parallel) and 0.78 s (series) against 1.00 s for today's prompt and its re-ask. A later voice round (5 requests per set-up) measured the first sound at a median of 0.90 s in parallel, 0.96 s today and 1.14 s in series. Single requests swing by up to a second (1.89, 1.44 and 1.25 s outliers in three different set-ups), so one round cannot rank series against parallel; the runner records the total only, not judge time against writer time.
 
 **Decisions made by the owner**
 - Policy: refuse blatant attacks and incitement; write contested politics, fiction with bad characters (with the note), a dictator's monologue in a play, an assigned debate side that argues violence is justified (with the note) and a dog-whistle with no named group (with the note); refuse a step-by-step procedure inside a story, a party or hype style on a funeral or condolence, and the minors rules (always refuse sexual content about minors, refuse pushing minors toward risky or illegal acts, note on talks to children about sensitive topics).
@@ -59,10 +61,10 @@ How to read it: rows 3 to 6 compare a fresh script against an old script that ha
 
 **Not done yet**
 1. A live check in the browser with `SAFETY_JUDGE=on` (a normal request, a refusal and a note), then the switch itself: the owner's call.
-2. A second, larger latency round with a judge-versus-writer breakdown in the runner, to rank series against parallel.
+2. Latency: the judge-versus-writer breakdown now exists (a trace span, and the runner's `--speak` mode); a voice round of 5 requests per set-up shows parallel at about today's level and ahead of series (see the section Where the wait goes). A larger round, ideally from the deployed host, would tighten the numbers.
 3. The wording of the note and of the three refusal messages (drafts in `app/services/judge.py`).
 4. Open questions: whether Groq's daily allowance counts a cancelled writer call; the policy gaps listed under "Not covered" below (self-harm, adult sexual content, doxxing, defamation, medical misinformation).
-5. The README does not yet mention the judge; its public claims must be updated when the judge is switched on.
+5. ~~README does not mention the judge~~ Done on 18 Nov 2026 with the switch-on.
 6. The accounts: the primary account (the app's) was used for the A/A, the fair A/B and the latency round on 16 Nov, roughly 185K of its 200K daily tokens by the run logs (an estimate: Groq does not report tokens left, and calls the runner hangs up on are not reported), so it has little headroom until it refills at about 8,300 an hour; the second account has been used for the other runs.
 
 **Limits that apply to every number here.** The labels, the cases and the judge wording share authors and a policy; the sets are small; no real user request has been tried; one run per case (temperature 0 should be steady, but this was not tested; the writer runs at 0.4, so a single script is a noisy sample); the Groq console does not count calls the runner hangs up on, so it understates real usage.
@@ -75,7 +77,7 @@ How to read it: rows 3 to 6 compare a fresh script against an old script that ha
 - Latency: `python -m evals.run_latency_check --cases tiny-win,boxing-pep,technical-explainer,wedding-toast,hate`.
 - Settings: the table above, as environment variables.
 
-## In the app: the judge in front of the writer (built, OFF by default)
+## In the app: the judge in front of the writer (built, ON by default since 18 Nov 2026)
 
 Files: `app/prompts/judge.py` (`judge_v5` word for word; a test keeps it identical to `evals/variants/judge_v5.txt`), `app/prompts/voxis.py` (`writer_prompt`: today's prompt minus only the refusal mechanics; a test pins the differences), `app/services/judge.py` (the call, the 3 s timeout, the forced-choice retry and the messages), `app/services/director.py` (the flow), `app/services/llm.py` (the judge's client), `app/config.py` (settings), `frontend/app.js` and `style.css` (the note).
 
@@ -421,6 +423,60 @@ The runner's report now has a latency section (refusal calls and first-token tim
 | What the user waits for the first word of a script | on the first call 0.83 s (n=1); after a re-ask median 1.07 s, max 1.78 s (n=6) | 0.77 s (n=1) | median 0.53 s, max 0.71 s (n=6) |
 
 **Reading it.** A wrongly refused request that is rescued by the re-ask waits about 1.0 s for its first word, against about 0.5 s when the model writes it first time (n=6 vs n=1 to 6, so only a rough difference of a few tenths of a second). Smoke run 1, at a 30 s gap, also had 8 per-minute waits that pushed first-token times to 12 to 14 s; at a 60 s gap there were none. Nothing here yet measures a decision step in front of the writer: that needs its own timing (decision time plus the writer's first token), and it may be possible to hide it by starting the writer in parallel and cancelling it if the decision is "refuse".
+
+## Where the wait goes: first word to first sound (18 Nov 2026)
+
+Runs: `evals/run_latency_check.py --speak` (real Azure speech; run `evals/out/latency-speak-20261118-110452`, about 50K tokens on the second account) and `evals/probe_groq_timing.py` (10 readings in two runs). Both measure this machine (in India) to Groq and Azure, not a deployed server. The app now also records a "Writer first chunk (before the verdict)" span in the request trace, so a parallel request shows whether the judge or the writer was the slower of the two.
+
+**Voice mode, 5 written requests per set-up, seconds from sending the request**
+
+| Case | Today: word / sound | Series: word / sound | Parallel: word / sound |
+|---|---|---|---|
+| tiny-win | 1.79 / 2.93 | 0.73 / 1.21 | 0.53 / 0.81 |
+| vague-professional | 0.55 / 0.94 | 0.70 / 1.14 | 0.56 / 0.90 |
+| boxing-pep | 0.67 / 1.11 | 0.81 / 1.44 | 0.60 / 0.92 |
+| technical-explainer | 0.61 / 0.96 | 0.75 / 1.05 | 0.54 / 0.84 |
+| wedding-toast | 0.61 / 0.95 | 0.69 / 1.14 | 0.56 / 0.95 |
+| **median** | 0.61 / 0.96 | 0.73 / 1.14 | **0.56 / 0.90** |
+
+Between the first word and the first sound: 0.38 s (today), 0.45 s (series), 0.33 s (parallel). One slow request (today's tiny-win: Azure took 1.1 s for a 20-character piece) is a tail event, not a pattern. Parallel was as fast as today's prompt here and 0.2 to 0.3 s ahead of series, as designed; with 5 requests per set-up, treat 0.56 against 0.61 s as a tie.
+
+**Where the time goes, in a parallel request (medians of the traces)**
+
+| Step | Time | Share of the first sound |
+|---|---|---|
+| The judge decides | 376 ms | hidden: it finishes before the writer's first text |
+| The writer's own first text | 544 ms | about 60% |
+| First speech piece ready (first text plus the rest of its sentence) | 584 ms | |
+| Azure renders that piece (median 48 characters) | 295 ms | about 33% |
+| First sound | about 0.88 to 0.90 s | |
+
+**The writer's 544 ms, split by the probe** (6 clean readings of the real writer prompt straight to Groq; the first text arrives at a median of 0.48 s): Groq's own queue about 51 ms (one reading of 778 ms: a queue tail), reading the 2,319-token prompt about 181 ms, which is roughly 13,000 tokens a second, and the remaining about 235 ms is the network round trip and connection overhead, about half of the wait. The plain round trip to Groq from this machine is 315 to 436 ms (a GET with no model work). A correction to earlier statements: reading the writer prompt takes about 180 ms, not a few milliseconds; but the 135 tokens that separate the minimal writer from today's prompt are worth only about 10 ms.
+
+**What would and would not help**
+- The judge is already hidden behind the writer by about 170 ms, so a faster judge (a shorter prompt, a local classifier) would not speed up first words or sounds.
+- A shorter first speech piece (option examined): Azure's render time grows by roughly 1.4 ms a character on top of about 230 ms fixed (pieces of 20 to 53 characters: median 295 ms; of 63 to 143 characters: median 387 ms, noisy). Cutting a first piece from about 85 to about 45 characters would save about 55 ms, around 5% of the first sound, and a piece cut mid-sentence risks choppy intonation. Not worth it; not built.
+- Shortening the writer prompt by a fifth would save about 35 ms and needs a blind A/B first; not worth it.
+- The network leg (about 235 ms to Groq from this machine) depends on where the app runs: the deployed server's distance to Groq (US) and to Azure (`centralindia`) decides it; this was not measured from the deployed host. `render.yaml` names no region and uses the free plan, which sleeps after about 15 minutes idle, so the first request after a pause takes 30 to 60 s: that dwarfs everything above for a visitor who arrives cold.
+- Perceived wait: the page now shows "Checking your request…" at once while the judge decides (a `status` event, sent first when the judge is on), replacing the blinking cursor until the first word.
+
+## Does LangChain slow the app down? (18 Nov 2026, no network and no tokens)
+
+The owner asked whether replacing the framework with custom code would cut latency. `evals/bench_framework_overhead.py` measures it: a fake Groq server on localhost answers instantly with a streamed reply of 600 chunks, and the same request (the real writer prompt) is sent three ways, 80 timed calls each, interleaved. So only the client's own work is left in the numbers. The app uses LangChain only for prompt templates (`ChatPromptTemplate`) and `ChatGroq.astream` (the writer, the judge and the coach).
+
+| Client | HTTP requests per call | First chunk (median) | Whole 600-chunk stream (median) |
+|---|---|---|---|
+| LangChain `ChatGroq` (today) | 1 | 9.9 ms | 185 ms |
+| Groq's own SDK | 1 | 9.9 ms | 141 ms |
+| Plain httpx, parsing the stream by hand | 1 | 9.3 ms | 37 ms |
+
+- **No extra requests:** every client makes exactly one HTTP request per call.
+- **First word:** LangChain adds about 0.6 ms over a hand-written client, against a real wait of about 480 ms (about 235 ms Groq, about 235 ms network): about 0.1%.
+- **Building a prompt:** 0.33 ms from the LangChain template, against 0.003 ms for a plain string replace: 0.3 ms saved.
+- **Per streamed chunk: why the hand-written client is faster, and what real streams look like.** Unprofiled, the work per chunk is about 61 microseconds for plain httpx, 235 for Groq's SDK and 308 for LangChain. A profile of the three (cProfile against the fake server; the profiler inflates every number about threefold, so read the proportions) shows where it goes. Plain httpx turns each chunk into a Python dict with one `json.loads` and reads one field. Groq's SDK turns each chunk into typed objects (the chunk, its choice, its delta, plus the Groq usage extras) by walking the type definitions at run time: about 11 `construct_type` calls, 3 `construct` calls and about 170 `isinstance` checks per chunk, around 40% of its time in just the top nine functions. LangChain sits on top of the SDK and repeats a second conversion: it does all of the SDK's work (about 70% of its per-chunk cost), then validates each chunk into its own message objects (about 4 Pydantic validations and a serialisation per chunk, plus its callback machinery). What the extra work buys is typed, validated objects, retries and error classes; a hand-written client has to handle those cases itself.
+- **Real chunk arrival (measured on two real replies, about 6K tokens).** One token per chunk: 341 chunks for a 342-token reply and 630 for a 631-token reply, streaming at about 495 chunks a second. The chunks are bursty, not evenly spaced: the median gap is 0.12 to 0.18 ms, the mean 2.0 ms, the 90th percentile 4 to 6 ms and the longest 21 to 75 ms. So within a burst LangChain's 0.25 ms a chunk cannot keep up and a few chunks queue, but on average it is busy about 12% of the time (0.245 ms against a 2.0 ms mean gap), and it catches up between bursts. The cost to one request is a few milliseconds of delay on the last tokens at most, not the 148 ms of the fake-server test (which sends every chunk at once). At 495 chunks a second, one active stream uses about 12% of a CPU core for LangChain, against about 3% for plain httpx (61 microseconds a chunk): that, not latency, is what grows with many users streaming at once. (The earlier note that real chunks arrive "1 to 3 ms apart" was an estimate: the mean is right, the spacing is much more uneven.)
+- **What LangChain does cost: start-up.** Importing what the app uses takes about 1.7 to 1.9 s on this machine (two runs) against about 0.9 s for Groq's SDK alone and about 0.4 s for httpx (median of 7 fresh processes each; `evals/bench_import_cost.py`); the profile is `evals/profile_clients.py`; a one-time cost at boot, and likely larger on a slow free host (an estimate; not measured there). Memory was not measured.
+- **Conclusion:** custom code would not make a request faster in any way a user could notice. The case for replacing LangChain would be start-up time, CPU under load and one fewer dependency, not request latency.
 
 ## Jev (checked 11 Nov 2026, third-party sources only; TypeSafe's own docs not read)
 

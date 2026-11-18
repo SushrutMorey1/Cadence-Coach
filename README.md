@@ -100,6 +100,8 @@ The app needs a running MySQL server and Google OAuth credentials, and it refuse
 | `AZURE_SPEECH_KEY` / `AZURE_SPEECH_REGION` | — / `centralindia` | Required for speech. |
 | `LLM_MODEL` | `qwen/qwen3.8-27b` | Any Groq chat model. Check `/api/health → llm.available`. |
 | `WHISPER_MODEL` | `whisper-large-v3` | `-turbo` is faster but hears fewer fillers. |
+| `SAFETY_JUDGE` | `on` | A short judge call (about 740 tokens) decides write / write with a note / refuse before the script is shown; `off` goes back to the single all-in-one prompt. See docs/SAFETY_EVAL.md. |
+| `JUDGE_PARALLEL` | `on` | Judge and writer start together and the script is held back until the verdict. |
 | `TTS_POOL_SIZE` | `3` | Pre-warmed synthesizers = how many pieces render in parallel. |
 | `TTS_SENTENCE_GAP_MS` | `700` | Pause between sentences. `off` restores Azure's default of about 0.9 s and keeps every break the model wrote. |
 | `AUDIO_RETENTION_HOURS` | `24` | Generated MP3s older than this are deleted at boot. |
@@ -139,7 +141,7 @@ Interactive docs at `/docs`. Everything except `/api/health` and the `/api/auth/
 **SSE events** (`data: {json}` lines):
 
 ```
-rewrite   token · rate_limited · retry · audio_segment {index,url,duration,directed} ·
+rewrite   status · note · token · rate_limited · retry · audio_segment {index,url,duration,directed} ·
           script_done {display_script,tts_script} · audio_done · done · error
 coach     token · rate_limited · retry · result · done · error
 ```
@@ -213,7 +215,7 @@ evals/                      The blind quality test: director_cases.json, run_dir
 - **Groq's free tier is shared by everyone using the key.** It allows 200,000 tokens per model, refilling at about 8,300 an hour. That is about 70 Director runs a day, and the Coach draws on the same budget.
 - **A Groq output limit is not investigated.** One run returned `output tokens per minute: Limit 1000, Requested 2500`, then succeeded on retry. It may matter with several users at once.
 - **Comic writing:** the original prompt still won the comic case in the blind test.
-- **Tone clashes:** a grave draft in a hype style is usually refused on the first try and rescued by the automatic retry, and the script can mention the clash ("We do not hype a funeral").
+- **Tone clashes:** with the safety judge on (the default), a style that makes light of a death or tragedy is refused up front with a message saying why; with `SAFETY_JUDGE=off` it is refused by the writer and rescued by one visible re-ask.
 - **"Not just X, it is Y":** the prompt forbids it, but the model still uses it, at about 0.6 times per 100 words.
 - **Pace:** the voice averages about 164 words a minute, a little above the 130–160 the Coach recommends, and some scripts run over 180.
 
